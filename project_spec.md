@@ -352,12 +352,21 @@ A living list — any new machine-readable error code introduced in code must be
 | `DEVICE_NOT_FOUND` | 404 | no device with the given `:id` (§6.2) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
 | `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid or references a row that doesn't exist |
+| `VALIDATION_ERROR` | 400 | a request field is missing, malformed, or fails a domain-specific check (wrong format, wrong type, must reference a different row, etc.) |
+| `INVALID_JSON` | 400 | the request body could not be parsed as JSON |
+| `INTERNAL_ERROR` | 500 | an unexpected server-side error (e.g. a database I/O failure) unrelated to the caller's input |
+| `ACCOUNT_NOT_FOUND` | 404 | no account with the given `:id`, or a referenced `account_id`/`transfer_account_id` doesn't exist |
+| `ACCOUNT_EXISTS` | 409 | `POST /api/accounts` supplied an `id` already in use |
+| `CATEGORY_NOT_FOUND` | 404 | no category with the given `:id`, or a referenced `category_id` doesn't exist |
+| `CATEGORY_EXISTS` | 409 | `POST /api/categories` supplied an `id` already in use |
+| `CATEGORY_GROUP_NOT_FOUND` | 404 | `group_id` doesn't name an existing category group |
 
 ### 7.3 Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/accounts` | List accounts |
+| `GET` | `/api/accounts/:id` | Get a single account |
 | `POST` | `/api/accounts` | Create account |
 | `PATCH` | `/api/accounts/:id` | Update/close account |
 | `GET` | `/api/categories` | List category groups + categories |
