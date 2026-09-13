@@ -44,7 +44,9 @@ jobs:
   # linux/windows need no CGO (fyne.io/systray's backends for both are
   # pure Go), so they're cross-compiled from ubuntu-latest; darwin needs
   # CGO (Cocoa has no pure-Go binding) and so must build natively on a
-  # real macOS runner for both Intel and Apple Silicon.
+  # real macOS runner. Only the Apple Silicon (M1+) runner is used here —
+  # the Intel macOS runners (macos-*-large) are billed even for public
+  # repos, unlike the standard arm64 macos-latest runner.
   build:
     needs: test
     strategy:
@@ -61,15 +63,6 @@ jobs:
             goos: windows
             goarch: amd64
             cgo: "0"
-          - name: darwin-amd64
-            # macos-13 (Intel) hosted runners have been fully retired by
-            # GitHub — that label queues forever with no runner ever
-            # picking it up. macos-15-large is the current Intel image;
-            # -large/-xlarge macOS runners are free for public repos.
-            os: macos-15-large
-            goos: darwin
-            goarch: amd64
-            cgo: "1"
           - name: darwin-arm64
             os: macos-latest
             goos: darwin
