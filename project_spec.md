@@ -347,6 +347,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `PAIRING_REQUIRED` | 403 | request has no valid, non-revoked device token (§6.2) |
 | `PAIRING_RATE_LIMITED` | 429 | too many failed pairing attempts from this source (§6.3) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
+| `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid or references a row that doesn't exist |
 
 ### 7.3 Endpoints
 
