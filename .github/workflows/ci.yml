@@ -62,7 +62,11 @@ jobs:
             goarch: amd64
             cgo: "0"
           - name: darwin-amd64
-            os: macos-13
+            # macos-13 (Intel) hosted runners have been fully retired by
+            # GitHub — that label queues forever with no runner ever
+            # picking it up. macos-15-large is the current Intel image;
+            # -large/-xlarge macOS runners are free for public repos.
+            os: macos-15-large
             goos: darwin
             goarch: amd64
             cgo: "1"
