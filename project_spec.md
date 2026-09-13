@@ -342,6 +342,8 @@ A living list — any new machine-readable error code introduced in code must be
 | `PAYEE_NOT_FOUND` | 404 | no payee with the given `:id` |
 | `PAYEE_EXISTS` | 409 | `POST /api/payees` supplied an `id` already in use |
 | `REASSIGN_TARGET_NOT_FOUND` | 404 | `reassign_to` doesn't name an existing, non-deleted category/payee (§5.4) |
+| `TRANSACTION_NOT_FOUND` | 404 | no transaction with the given `:id` |
+| `TRANSACTION_EXISTS` | 409 | `POST /api/transactions` supplied an `id` (or `transfer_transaction_id`) already in use |
 | `PAIRING_REQUIRED` | 403 | request has no valid, non-revoked device token (§6.2) |
 | `PAIRING_RATE_LIMITED` | 429 | too many failed pairing attempts from this source (§6.3) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |

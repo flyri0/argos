@@ -111,6 +111,15 @@ func GetAccount(ctx context.Context, conn *sql.DB, id string) (Account, error) {
 	return a, nil
 }
 
+func getAccountTx(ctx context.Context, tx *sql.Tx, id string) (Account, error) {
+	row := tx.QueryRowContext(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = ? AND deleted_at IS NULL`, id)
+	a, err := scanAccount(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Account{}, ErrNotFound
+	}
+	return a, err
+}
+
 // nextServerVersion computes the next value of the strictly-increasing,
 // whole-database version counter (§5.1) from the tables that carry it —
 // there is no dedicated sequence table, so it's derived from current data.
