@@ -115,5 +115,15 @@
   "register.confirmDelete": "Delete this transaction?",
   "register.confirmDeleteTransferNote": "This will also delete the matching transfer transaction in {{account}}.",
   "register.confirm": "Confirm",
-  "register.closedNotice": "This account is closed and can't accept new transactions."
+  "register.closedNotice": "This account is closed and can't accept new transactions.",
+
+  "budget.prevMonth": "Previous month",
+  "budget.nextMonth": "Next month",
+  "budget.empty": "No categories yet.",
+  "budget.category": "Category",
+  "budget.budgeted": "Budgeted",
+  "budget.budgetedFor": "Budgeted for {{category}}",
+  "budget.activity": "Activity",
+  "budget.available": "Available",
+  "budget.hiddenBadge": "Hidden"
 }

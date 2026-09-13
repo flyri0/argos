@@ -2,13 +2,15 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AccountsScreen } from "./features/accounts/AccountsScreen";
+import { BudgetScreen } from "./features/budget/BudgetScreen";
 import { CategoriesScreen } from "./features/categories/CategoriesScreen";
 import { PayeesScreen } from "./features/payees/PayeesScreen";
 
-type Tab = "accounts" | "categories" | "payees";
+type Tab = "accounts" | "budget" | "categories" | "payees";
 
 const TABS: { id: Tab; labelKey: string }[] = [
   { id: "accounts", labelKey: "nav.accounts" },
+  { id: "budget", labelKey: "nav.budget" },
   { id: "categories", labelKey: "nav.categories" },
   { id: "payees", labelKey: "nav.payees" },
 ];
@@ -36,6 +38,7 @@ function App() {
       </header>
       <main>
         {tab === "accounts" && <AccountsScreen />}
+        {tab === "budget" && <BudgetScreen />}
         {tab === "categories" && <CategoriesScreen />}
         {tab === "payees" && <PayeesScreen />}
       </main>
