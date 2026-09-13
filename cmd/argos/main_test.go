@@ -1,10 +1,65 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"argos/internal/config"
 )
+
+func TestTopLevelCommand_ServeSubcommand(t *testing.T) {
+	cmd, rest := topLevelCommand([]string{"serve", "--headless"})
+	if cmd != "serve" {
+		t.Fatalf("expected cmd %q, got %q", "serve", cmd)
+	}
+	if len(rest) != 1 || rest[0] != "--headless" {
+		t.Fatalf("expected rest to be [--headless], got %v", rest)
+	}
+}
+
+func TestTopLevelCommand_ServiceSubcommand(t *testing.T) {
+	cmd, rest := topLevelCommand([]string{"service", "install"})
+	if cmd != "service" {
+		t.Fatalf("expected cmd %q, got %q", "service", cmd)
+	}
+	if len(rest) != 1 || rest[0] != "install" {
+		t.Fatalf("expected rest to be [install], got %v", rest)
+	}
+}
+
+func TestTopLevelCommand_BareFlagsImplyServe(t *testing.T) {
+	cmd, rest := topLevelCommand([]string{"--headless", "--port=9090"})
+	if cmd != "serve" {
+		t.Fatalf("expected bare flags to imply serve, got %q", cmd)
+	}
+	if len(rest) != 2 {
+		t.Fatalf("expected rest to be untouched, got %v", rest)
+	}
+}
+
+func TestTopLevelCommand_NoArgsImplyServe(t *testing.T) {
+	cmd, rest := topLevelCommand(nil)
+	if cmd != "serve" {
+		t.Fatalf("expected no args to imply serve, got %q", cmd)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("expected empty rest, got %v", rest)
+	}
+}
+
+func TestRunService_UnknownSubcommandRejected(t *testing.T) {
+	var out strings.Builder
+	if err := runService([]string{"frobnicate"}, &out); err == nil {
+		t.Fatalf("expected an unknown service subcommand to be rejected")
+	}
+}
+
+func TestRunService_NoSubcommandRejected(t *testing.T) {
+	var out strings.Builder
+	if err := runService(nil, &out); err == nil {
+		t.Fatalf("expected no service subcommand to be rejected")
+	}
+}
 
 func TestParseFlags_Defaults(t *testing.T) {
 	f, err := parseFlags(nil)

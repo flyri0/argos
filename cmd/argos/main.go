@@ -20,6 +20,7 @@ import (
 	"argos/internal/api"
 	"argos/internal/config"
 	"argos/internal/db"
+	"argos/internal/service"
 )
 
 func main() {
@@ -27,6 +28,48 @@ func main() {
 		fmt.Fprintln(os.Stderr, "argos:", err)
 		os.Exit(1)
 	}
+}
+
+// topLevelCommand splits args into an explicit top-level command ("serve"
+// or "service") and its remaining arguments. Bare flags with no leading
+// subcommand (e.g. "argos --headless", predating the "serve" subcommand)
+// are treated as an implicit "serve" so existing invocations keep working.
+func topLevelCommand(args []string) (cmd string, rest []string) {
+	if len(args) > 0 && (args[0] == "serve" || args[0] == "service") {
+		return args[0], args[1:]
+	}
+	return "serve", args
+}
+
+func run(args []string, stdout io.Writer) error {
+	cmd, rest := topLevelCommand(args)
+	if cmd == "service" {
+		return runService(rest, stdout)
+	}
+	return runServe(rest, stdout)
+}
+
+// runService implements "argos service install" / "argos service
+// uninstall" (§3.2): registering/removing the systemd user unit that runs
+// "argos serve --headless" and is enabled to start on boot.
+func runService(args []string, stdout io.Writer) error {
+	if len(args) != 1 || (args[0] != "install" && args[0] != "uninstall") {
+		return fmt.Errorf("usage: argos service <install|uninstall>")
+	}
+
+	switch args[0] {
+	case "install":
+		if err := service.Install(); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "argos service installed and enabled to start on boot")
+	case "uninstall":
+		if err := service.Uninstall(); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "argos service uninstalled")
+	}
+	return nil
 }
 
 // flagOverrides holds the CLI-flag values for the three §3.3 config
@@ -82,7 +125,10 @@ func bindAddr(cfg config.Config) string {
 	return net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 }
 
-func run(args []string, stdout io.Writer) error {
+// runServe implements "argos serve" (also reachable as bare flags with no
+// subcommand): it resolves the effective config and actually runs the
+// HTTP server, per §3.2/§3.3.
+func runServe(args []string, stdout io.Writer) error {
 	f, err := parseFlags(args)
 	if err != nil {
 		return err
