@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Runs gofmt/vet/test natively on each OS, since several packages
+  # (internal/tray's autostart, internal/service's systemd/launchd/Windows
+  # Service backends) are gated by //go:build tags and only actually
+  # compile+execute on their own OS.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt check
+        if: runner.os != 'Windows'
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  # Cross-compiles the argos binary for every platform §3.1/§3.2 target.
+  # linux/windows need no CGO (fyne.io/systray's backends for both are
+  # pure Go), so they're cross-compiled from ubuntu-latest; darwin needs
+  # CGO (Cocoa has no pure-Go binding) and so must build natively on a
+  # real macOS runner for both Intel and Apple Silicon.
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+          - name: windows-amd64
+            os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+          - name: darwin-amd64
+            os: macos-13
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+          - name: darwin-arm64
+            os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          mkdir -p dist
+          out="dist/argos-${{ matrix.name }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then out="$out.exe"; fi
+          go build -o "$out" ./cmd/argos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argos-${{ matrix.name }}
+          path: dist/
