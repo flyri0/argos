@@ -384,23 +384,23 @@ A living list — any new machine-readable error code introduced in code must be
 
 ## 8. MVP feature checklist
 
-- [ ] Accounts: create, edit, close (on-budget / off-budget); balance always computed from transactions, never stored; `type` validated against the fixed enum (§7.1)
-- [ ] Transactions: create, edit, delete, mark cleared, transfers between accounts; rejected on closed accounts
-- [ ] Categories: groups + categories, single non-deletable income group, reassignment flow required to delete a category/payee that's in use
-- [ ] Payees: create, rename, soft-delete with reassignment (§5.4)
+- [x] Accounts: create, edit, close (on-budget / off-budget); balance always computed from transactions, never stored; `type` validated against the fixed enum (§7.1)
+- [x] Transactions: create, edit, delete, mark cleared, transfers between accounts; rejected on closed accounts
+- [x] Categories: groups + categories, single non-deletable income group, reassignment flow required to delete a category/payee that's in use
+- [x] Payees: create, rename, soft-delete with reassignment (§5.4)
 - [ ] Budgeting: assign amounts per category/month, correct rollover, correct overspending rule, "Available to Budget" calculation, zero-amount PUT deletes the row
-- [ ] Monthly budget grid UI (budgeted / activity / available)
-- [ ] Account register UI
+- [x] Monthly budget grid UI (budgeted / activity / available)
+- [x] Account register UI
 - [ ] API conventions applied consistently: response/error envelope, HTTP status codes, error code table (§7.1–§7.2)
-- [ ] Go binary with embedded frontend (`embed.FS`), single-command build
-- [ ] SQLite persistence on the server
+- [x] Go binary with embedded frontend (`embed.FS`), single-command build
+- [x] SQLite persistence on the server
 - [ ] PWA: installable, offline-capable via IndexedDB + outbox + `/sync`
-- [ ] Sync conflict resolution via Hybrid Logical Clock (physical + counter + node id), not raw client timestamps
-- [ ] Sync push: exact wire format from §2.4, per-mutation success/failure reporting, explicit atomic groups for transfers and category/payee reassignment
-- [ ] Schema version mismatch: sync pauses with an "update required" notice, local offline use keeps working
-- [ ] Desktop mode: tray icon with status, bind-mode toggle, start-on-login, clean quit
-- [ ] Headless mode: CLI flags, config file, service installation (systemd/launchd/Windows Service)
-- [ ] i18n scaffolding in place (English as default locale; server emits English-only error codes/messages, frontend owns all translation)
+- [x] Sync conflict resolution via Hybrid Logical Clock (physical + counter + node id), not raw client timestamps
+- [x] Sync push: exact wire format from §2.4, per-mutation success/failure reporting, explicit atomic groups for transfers and category/payee reassignment
+- [x] Schema version mismatch: sync pauses with an "update required" notice, local offline use keeps working
+- [x] Desktop mode: tray icon with status, bind-mode toggle, start-on-login, clean quit
+- [x] Headless mode: CLI flags, config file, service installation (systemd/launchd/Windows Service)
+- [x] i18n scaffolding in place (English as default locale; server emits English-only error codes/messages, frontend owns all translation)
 - [ ] Device pairing: first-device bootstrap via high-entropy setup code (no expiry, rate-limited), approval flow for subsequent devices, rename, token issuance, device list + revocation, localhost bypass
 
 ## 9. Suggested repo structure
