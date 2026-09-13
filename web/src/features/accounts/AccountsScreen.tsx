@@ -9,13 +9,15 @@ import {
   transactions,
   type Account,
 } from "../../db";
+import { AccountRegisterScreen } from "../transactions/AccountRegisterScreen";
 import { AccountForm, type AccountFormValues } from "./AccountForm";
 import { AccountList } from "./AccountList";
 
 type View =
   | { mode: "list" }
   | { mode: "create" }
-  | { mode: "edit"; account: Account };
+  | { mode: "edit"; account: Account }
+  | { mode: "register"; account: Account };
 
 export function AccountsScreen() {
   const { t } = useTranslation();
@@ -90,11 +92,21 @@ export function AccountsScreen() {
     );
   }
 
+  if (view.mode === "register") {
+    return (
+      <AccountRegisterScreen
+        account={openAccounts.find((a) => a.id === view.account.id) ?? view.account}
+        onBack={() => setView({ mode: "list" })}
+      />
+    );
+  }
+
   return (
     <AccountList
       accounts={openAccounts}
       balances={balances}
       onAdd={() => setView({ mode: "create" })}
+      onOpenRegister={(account) => setView({ mode: "register", account })}
       onEdit={(account) => setView({ mode: "edit", account })}
       onToggleClosed={handleToggleClosed}
     />

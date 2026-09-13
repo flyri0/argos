@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Account } from "../../db";
+import { formatCurrency } from "../../lib/currency";
 
 interface AccountListProps {
   accounts: Account[];
   balances: Map<string, number>;
   onAdd: () => void;
+  onOpenRegister: (account: Account) => void;
   onEdit: (account: Account) => void;
   onToggleClosed: (account: Account) => void;
 }
@@ -15,6 +17,7 @@ export function AccountList({
   accounts,
   balances,
   onAdd,
+  onOpenRegister,
   onEdit,
   onToggleClosed,
 }: AccountListProps) {
@@ -48,12 +51,14 @@ export function AccountList({
             {accounts.map((account) => (
               <tr key={account.id}>
                 <td>
-                  {account.name}
-                  {account.closed && ` (${t("accounts.closedBadge")})`}
+                  <button type="button" onClick={() => onOpenRegister(account)}>
+                    {account.name}
+                    {account.closed && ` (${t("accounts.closedBadge")})`}
+                  </button>
                 </td>
                 <td>{t(`accountType.${account.type}`)}</td>
                 <td>
-                  {formatAmount(balances.get(account.id) ?? 0, account.currency)}
+                  {formatCurrency(balances.get(account.id) ?? 0, account.currency)}
                 </td>
                 <td>
                   <button type="button" onClick={() => onEdit(account)}>
@@ -98,16 +103,4 @@ export function AccountList({
       )}
     </section>
   );
-}
-
-// Accounts always carry an ISO 4217 code (§5.2), but real multi-currency
-// support is out of MVP scope, so a code Intl doesn't recognize falls back
-// to a plain number rather than crashing the list.
-function formatAmount(minorUnits: number, currency = "USD"): string {
-  const amount = minorUnits / 100;
-  try {
-    return amount.toLocaleString(undefined, { style: "currency", currency });
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
 }
