@@ -1,0 +1,8 @@
+{
+  "app.title": "Argos",
+  "app.tagline": "Local-first envelope budgeting",
+  "app.loading": "Loading…",
+  "nav.accounts": "Accounts",
+  "nav.budget": "Budget",
+  "nav.settings": "Settings"
+}
