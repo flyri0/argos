@@ -1,6 +1,8 @@
 package api
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,9 +21,16 @@ func testFrontend() fstest.MapFS {
 	}
 }
 
+// testLogger discards its output — these tests assert on HTTP behavior,
+// not on log lines, and a nil *slog.Logger would panic NewRouter's request
+// logging middleware.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestNewRouter_ProtectsApiRoutesFromNonLocalhost(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -38,7 +47,7 @@ func TestNewRouter_ProtectsApiRoutesFromNonLocalhost(t *testing.T) {
 
 func TestNewRouter_LocalhostReachesApiRoutesWithoutAToken(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -55,7 +64,7 @@ func TestNewRouter_LocalhostReachesApiRoutesWithoutAToken(t *testing.T) {
 
 func TestNewRouter_ValidDeviceTokenReachesApiRoutes(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -85,7 +94,7 @@ func TestNewRouter_ValidDeviceTokenReachesApiRoutes(t *testing.T) {
 
 func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -113,7 +122,7 @@ func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 
 func TestNewRouter_HealthReachableWithoutADeviceToken(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -130,7 +139,7 @@ func TestNewRouter_HealthReachableWithoutADeviceToken(t *testing.T) {
 
 func TestNewRouter_FrontendServedWithoutADeviceToken(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn, testFrontend())
+	router, err := NewRouter(conn, testFrontend(), testLogger())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}

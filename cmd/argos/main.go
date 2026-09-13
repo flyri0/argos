@@ -18,6 +18,7 @@ import (
 	"argos/internal/api"
 	"argos/internal/config"
 	"argos/internal/db"
+	"argos/internal/logging"
 	"argos/internal/service"
 	"argos/internal/tray"
 	"argos/internal/webui"
@@ -143,6 +144,19 @@ func runServe(args []string, stdout io.Writer) error {
 		return err
 	}
 
+	// Set up logging (see project_spec.md "Logging") before anything else
+	// that can fail, so even a startup failure below is captured. From
+	// here on, stdout also feeds the rotating log file — every existing
+	// fmt.Fprintf(stdout, ...) call below and in internal/tray and
+	// internal/service keeps working unchanged, just now persisted too.
+	// Setup never errors out — a broken log file must never be the reason
+	// Argos refuses to start.
+	logWriter, logger, closeLog := logging.Setup(cfg.DataDir, stdout)
+	defer closeLog()
+	stdout = logWriter
+
+	logger.Info("starting argos", "bind_mode", cfg.BindMode, "port", cfg.Port, "data_dir", cfg.DataDir, "headless", f.headless)
+
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data dir %s: %w", cfg.DataDir, err)
 	}
@@ -150,6 +164,7 @@ func runServe(args []string, stdout io.Writer) error {
 	if err := db.Migrate(dbPath); err != nil {
 		return fmt.Errorf("migrating database: %w", err)
 	}
+	logger.Info("database migrated", "path", dbPath)
 	conn, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -160,7 +175,7 @@ func runServe(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("loading embedded frontend: %w", err)
 	}
-	router, err := api.NewRouter(conn, frontend)
+	router, err := api.NewRouter(conn, frontend, logger)
 	if err != nil {
 		return fmt.Errorf("building router: %w", err)
 	}
@@ -188,7 +203,7 @@ func runServe(args []string, stdout io.Writer) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stdout, "argos listening on %s (bind_mode=%s)\n", addr, cfg.BindMode)
+		logger.Info("argos listening", "addr", addr, "bind_mode", cfg.BindMode)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -200,6 +215,7 @@ func runServe(args []string, stdout io.Writer) error {
 		return nil
 	case <-ctx.Done():
 		stop()
+		logger.Info("shutting down")
 		return srv.Shutdown(context.Background())
 	}
 }

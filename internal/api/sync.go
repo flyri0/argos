@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -32,14 +33,25 @@ type clockSkewError struct{ msg string }
 
 func (e *clockSkewError) Error() string { return e.msg }
 
-// SyncHandler implements POST /sync (§2.4), backed by internal/db.
+// SyncHandler implements POST /sync (§2.4), backed by internal/db. Logger
+// is optional — tests constructing this directly often leave it nil, so
+// every use goes through the logger() accessor below rather than the
+// field itself.
 type SyncHandler struct {
-	DB *sql.DB
+	DB     *sql.DB
+	Logger *slog.Logger
 }
 
-// RegisterSyncRoutes registers POST /sync.
-func RegisterSyncRoutes(mux *http.ServeMux, conn *sql.DB) {
-	h := &SyncHandler{DB: conn}
+func (h *SyncHandler) logger() *slog.Logger {
+	if h.Logger != nil {
+		return h.Logger
+	}
+	return slog.Default()
+}
+
+// RegisterSyncRoutes registers POST /sync. logger must not be nil.
+func RegisterSyncRoutes(mux *http.ServeMux, conn *sql.DB, logger *slog.Logger) {
+	h := &SyncHandler{DB: conn, Logger: logger}
 	mux.HandleFunc("POST /sync", h.Handle)
 }
 
@@ -121,6 +133,8 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logPush(req.Since, results, changes, serverVersion)
+
 	writeJSON(w, http.StatusOK, syncResponse{
 		ServerVersion: serverVersion,
 		SyncID:        meta.SyncID,
@@ -128,6 +142,49 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		Results:       results,
 		Changes:       changes,
 	})
+}
+
+// logPush summarizes one /sync round-trip: sync is the most complex, most
+// error-prone part of the backend (HLC conflict resolution, atomic groups,
+// per-mutation independence, §2.3/§2.4), so this is deliberately more
+// detailed than the generic per-request line withRequestLogging already
+// produces — a bare "200 OK" doesn't say whether every mutation actually
+// applied or whether some silently lost a conflict or got rejected as
+// invalid. Each rejected_invalid mutation also gets its own line at Warn,
+// since that status means either a client bug or a real data problem
+// worth a human noticing, not routine conflict resolution.
+func (h *SyncHandler) logPush(since int64, results []syncResult, changes []syncChange, serverVersion int64) {
+	var applied, stale, invalid int
+	for _, res := range results {
+		switch res.Status {
+		case "applied":
+			applied++
+		case "rejected_stale":
+			stale++
+		case "rejected_invalid":
+			invalid++
+		}
+	}
+
+	h.logger().Info("sync push",
+		"since", since,
+		"mutations", len(results),
+		"applied", applied,
+		"rejected_stale", stale,
+		"rejected_invalid", invalid,
+		"changes_returned", len(changes),
+		"server_version", serverVersion,
+	)
+
+	for _, res := range results {
+		if res.Status != "rejected_invalid" || res.Error == nil {
+			continue
+		}
+		h.logger().Warn("sync mutation rejected",
+			"table", res.Table, "id", res.ID,
+			"error_code", res.Error.Code, "error_message", res.Error.Message,
+		)
+	}
 }
 
 // groupMutations splits a flat mutation list into atomic units (§2.3): a

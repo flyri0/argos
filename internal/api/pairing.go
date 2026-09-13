@@ -5,11 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
+	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -24,6 +22,7 @@ import (
 // finer-grained locking and costs nothing in practice.
 type PairingHandler struct {
 	DB      *sql.DB
+	logger  *slog.Logger
 	mu      sync.Mutex
 	code    string // the live bootstrap setup code; "" once devices is non-empty
 	limiter *auth.RateLimiter
@@ -60,11 +59,12 @@ const pairingCodeTTL = 10 * time.Minute
 
 // RegisterPairingRoutes registers the device pairing endpoints. On first
 // startup (an empty devices table, §6.1) it generates the bootstrap setup
-// code and prints it to stdout. It returns the handler so callers outside
-// this package (desktop mode's tray, §6.1: "the tray icon also shows it
-// directly") can read the live setup code via PairingHandler.SetupCode.
-func RegisterPairingRoutes(mux *http.ServeMux, conn *sql.DB) (*PairingHandler, error) {
-	h, err := newPairingHandler(conn, os.Stdout)
+// code and logs it. It returns the handler so callers outside this package
+// (desktop mode's tray, §6.1: "the tray icon also shows it directly") can
+// read the live setup code via PairingHandler.SetupCode. logger must not
+// be nil.
+func RegisterPairingRoutes(mux *http.ServeMux, conn *sql.DB, logger *slog.Logger) (*PairingHandler, error) {
+	h, err := newPairingHandler(conn, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -92,9 +92,10 @@ func (h *PairingHandler) SetupCode(ctx context.Context) (code string, active boo
 	return h.code, true, nil
 }
 
-func newPairingHandler(conn *sql.DB, out io.Writer) (*PairingHandler, error) {
+func newPairingHandler(conn *sql.DB, logger *slog.Logger) (*PairingHandler, error) {
 	h := &PairingHandler{
 		DB:             conn,
+		logger:         logger,
 		limiter:        auth.NewRateLimiter(),
 		pending:        make(map[string]pendingCode),
 		approveLimiter: auth.NewRateLimiter(),
@@ -111,7 +112,7 @@ func newPairingHandler(conn *sql.DB, out io.Writer) (*PairingHandler, error) {
 			return nil, err
 		}
 		h.code = code
-		fmt.Fprintf(out, "Argos setup code: %s\n", code)
+		logger.Info("bootstrap setup code", "code", code)
 	}
 
 	return h, nil
@@ -181,6 +182,7 @@ func (h *PairingHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Info("first device paired via bootstrap", "device_id", device.ID, "remote_addr", ip)
 	writeJSON(w, http.StatusCreated, bootstrapResponse{
 		ID:         device.ID,
 		Name:       device.Name,
@@ -299,6 +301,7 @@ func (h *PairingHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	h.pending[req.Code] = pendingCode{expiresAt: pending.expiresAt, claimed: true, token: token}
 	h.pendingMu.Unlock()
 
+	h.logger.Info("device approved", "device_id", device.ID, "approving_remote_addr", ip)
 	writeJSON(w, http.StatusCreated, bootstrapResponse{
 		ID:         device.ID,
 		Name:       device.Name,

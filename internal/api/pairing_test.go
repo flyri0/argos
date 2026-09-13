@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,21 +30,27 @@ func newTestDB(t *testing.T) *sql.DB {
 	return conn
 }
 
-var setupCodePattern = regexp.MustCompile(`Argos setup code: (\S+)`)
+var setupCodePattern = regexp.MustCompile(`bootstrap setup code" code=(\S+)`)
+
+// testLoggerTo returns a logger writing plain text lines to out, so a test
+// can assert on what got logged the same way it would assert on stdout.
+func testLoggerTo(out *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(out, nil))
+}
 
 func newTestPairingHandler(t *testing.T) (*PairingHandler, string) {
 	t.Helper()
 	conn := newTestDB(t)
 
 	var out bytes.Buffer
-	h, err := newPairingHandler(conn, &out)
+	h, err := newPairingHandler(conn, testLoggerTo(&out))
 	if err != nil {
 		t.Fatalf("newPairingHandler: %v", err)
 	}
 
 	m := setupCodePattern.FindStringSubmatch(out.String())
 	if m == nil {
-		t.Fatalf("expected setup code printed to stdout, got %q", out.String())
+		t.Fatalf("expected setup code logged, got %q", out.String())
 	}
 	return h, m[1]
 }
@@ -153,7 +160,7 @@ func TestPairingBootstrap_NoCodePrintedWhenDevicesAlreadyExist(t *testing.T) {
 	conn := newTestDB(t)
 
 	var out1 bytes.Buffer
-	h1, err := newPairingHandler(conn, &out1)
+	h1, err := newPairingHandler(conn, testLoggerTo(&out1))
 	if err != nil {
 		t.Fatalf("newPairingHandler: %v", err)
 	}
@@ -166,14 +173,14 @@ func TestPairingBootstrap_NoCodePrintedWhenDevicesAlreadyExist(t *testing.T) {
 	}
 
 	// A later restart of the handler against the same (now non-empty)
-	// devices table must not generate or print a new code at all.
+	// devices table must not generate or log a new code at all.
 	var out2 bytes.Buffer
-	h2, err := newPairingHandler(conn, &out2)
+	h2, err := newPairingHandler(conn, testLoggerTo(&out2))
 	if err != nil {
 		t.Fatalf("newPairingHandler (restart): %v", err)
 	}
-	if strings.Contains(out2.String(), "Argos setup code") {
-		t.Fatalf("expected no setup code printed once devices is non-empty, got %q", out2.String())
+	if strings.Contains(out2.String(), "bootstrap setup code") {
+		t.Fatalf("expected no setup code logged once devices is non-empty, got %q", out2.String())
 	}
 
 	w, _ := postBootstrap(t, h2, m[1])

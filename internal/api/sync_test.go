@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +111,40 @@ func TestSync_InvalidReferenceRejectedIndependently(t *testing.T) {
 	}
 	if resp.Results[1].Status != "rejected_invalid" || resp.Results[1].Error == nil || resp.Results[1].Error.Code != "SYNC_MUTATION_INVALID" {
 		t.Fatalf("expected transaction upsert rejected_invalid, got %+v", resp.Results[1])
+	}
+}
+
+func TestSync_LogsPushSummaryAndRejectedMutations(t *testing.T) {
+	conn := newTestDB(t)
+	var out bytes.Buffer
+	h := &SyncHandler{DB: conn, Logger: testLoggerTo(&out)}
+
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "payees", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333", "name": "Landlord",
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}},
+			{"table": "transactions", "op": "upsert", "group_id": null, "row": {
+				"id": "44444444-4444-4444-4444-444444444444",
+				"account_id": "99999999-9999-9999-9999-999999999999",
+				"date": "2026-01-01", "amount": -500, "cleared": false, "notes": "",
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	log := out.String()
+	for _, want := range []string{
+		`msg="sync push"`, "mutations=2", "applied=1", "rejected_invalid=1",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("expected sync push summary to contain %q, got %q", want, log)
+		}
+	}
+	if !strings.Contains(log, `msg="sync mutation rejected"`) || !strings.Contains(log, "error_code=SYNC_MUTATION_INVALID") {
+		t.Fatalf("expected the rejected mutation to be logged with its error code, got %q", log)
 	}
 }
 

@@ -89,6 +89,16 @@ precedence: flags > environment variables > config file > defaults.
 `bind_mode` is either `"localhost"` (default) or `"lan"` — LAN mode is
 never enabled silently.
 
+### Logs
+
+Argos writes a human-readable log file to `<data_dir>/logs/argos.log` —
+startup/shutdown, every HTTP request (method, path, status, duration), and
+detailed `/sync` push summaries. A fresh file starts on every launch and
+whenever the active one passes 10MB; at most 5 log files are ever kept, the
+oldest deleted automatically. See
+[`project_spec.md` §3.4](./project_spec.md#34-logging) for the full
+details of what's logged and why.
+
 ### Running as a system service
 
 To have Argos start automatically on boot without a logged-in user or
@@ -156,6 +166,7 @@ argos/
 │   ├── budget/        # pure budgeting engine (rollover, overspending, availability)
 │   ├── config/        # shared runtime config (bind mode, port, data dir)
 │   ├── db/            # SQLite access layer, migrations
+│   ├── logging/       # rotating log files under <data_dir>/logs
 │   ├── sync/          # /sync endpoint logic, conflict resolution (HLC)
 │   ├── tray/          # desktop mode: system tray integration
 │   └── service/       # headless mode: service install/uninstall per OS

@@ -147,6 +147,17 @@ For running on a home server, NAS, or Raspberry Pi without a desktop environment
 - Both modes read the same config file — fields `bind_mode` (`"localhost"` or `"lan"`), `port`, and `data_dir` — so switching a machine from desktop use to headless service use doesn't require reconfiguration.
 - The bind mode is always explicit and visible (never silently listening on `0.0.0.0` without the user having chosen LAN mode) — localhost-only is the default until the user opts into LAN.
 
+### 3.4 Logging
+
+Argos is a backend most contributors will debug without a frontend developer's usual tools for spotting failures, so the server keeps a persistent, human-readable record of what it's been doing — not just whatever scrolls past in a terminal that closes when the process (or its parent shell) does.
+
+- **Location**: `<data_dir>/logs/argos.log`, next to the SQLite database rather than the config file — it's operational data tied to a specific installation, not configuration.
+- **Format**: plain human-readable text (`time=... level=... msg=... key=value ...`, one line per event), not JSON — these files are meant to be opened directly by whoever's debugging, not fed to a log aggregator.
+- **Rotation**: a fresh file starts on every server launch, so a given run's activity is never mixed into whatever a previous run left mid-file; a long-running session additionally rotates once the active file passes 10MB, so a server that stays up for weeks doesn't grow one unbounded file. Either way, **at most 5 log files are ever kept** (the active one plus 4 rotated backups) — the oldest is deleted automatically the moment a new one would push the count past that, so log storage never grows without bound on a low-power machine like a Raspberry Pi.
+- **What gets logged**: server startup and shutdown (config resolved, database migrated, listen address); the setup code printed on first run (§6.1); every HTTP request — method, path, status, duration, and source address, plus the exact error code and message (§7.2) for any 4xx/5xx response, so a status alone never has to be guessed at; a detailed summary of every `/sync` push — how many mutations were applied vs. rejected as stale vs. rejected as invalid, and the specific error for each invalid one — since sync (§2.3/§2.4) is the most complex, most error-prone part of the backend; and successful device bootstrap/approval events (§6), for a basic audit trail of who paired.
+- **Never blocks startup**: a logging failure (most commonly on Windows, where a previous instance still shutting down — or a second instance started by mistake — can hold `argos.log` open) is noted as a warning rather than treated as fatal. Argos always finishes starting and serves normally even if its own log file couldn't be opened; a diagnostic aid must never be the reason the actual application refuses to run.
+- Log files are local operational data only — never synced to clients, never exposed through any API endpoint.
+
 ## 4. Internationalization (i18n)
 
 i18n is part of the MVP, not something bolted on later.
@@ -412,6 +423,7 @@ A living list — any new machine-readable error code introduced in code must be
 - [x] Headless mode: CLI flags, config file, service installation (systemd/launchd/Windows Service)
 - [x] i18n scaffolding in place (English as default locale; server emits English-only error codes/messages, frontend owns all translation)
 - [x] Device pairing: first-device bootstrap via high-entropy setup code (no expiry, rate-limited), approval flow for subsequent devices, rename, token issuance, device list + revocation, localhost bypass
+- [x] Backend logging: rotating log files under `<data_dir>/logs`, capped at 5 total, covering startup/shutdown, every HTTP request, and detailed `/sync` push summaries (§3.4)
 
 ## 9. Suggested repo structure
 
@@ -423,7 +435,9 @@ argos/
 │   ├── api/                # HTTP handlers
 │   ├── auth/                # device pairing, token issuance/validation
 │   ├── budget/              # pure budgeting engine (rollover, overspending, availability)
+│   ├── config/              # shared runtime config (bind mode, port, data dir)
 │   ├── db/                  # SQLite access layer, migrations
+│   ├── logging/             # rotating log files under <data_dir>/logs (§3.4)
 │   ├── sync/                # /sync endpoint logic, conflict resolution
 │   ├── tray/                # desktop mode: system tray integration
 │   └── service/             # headless mode: service install/uninstall per OS
