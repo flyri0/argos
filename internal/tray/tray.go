@@ -125,14 +125,39 @@ func (app *App) onReady() {
 
 func (app *App) onExit() {}
 
+// lanAddr resolves this machine's LAN-facing IPv4 address by asking the OS
+// routing table which local interface it would use to reach an outside
+// address. Dialing UDP never actually sends a packet — it only looks up a
+// route — so this resolves correctly even with no internet access, as long
+// as the machine has a LAN interface with a route out of it. Overridden in
+// tests for a deterministic result.
+var lanAddr = func() (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
+}
+
 func (app *App) modeLabel() string {
 	app.mu.Lock()
-	defer app.mu.Unlock()
-	mode := "localhost only"
-	if app.cfg.BindMode == config.BindModeLAN {
-		mode = "LAN"
+	mode := app.cfg.BindMode
+	port := app.cfg.Port
+	app.mu.Unlock()
+
+	if mode != config.BindModeLAN {
+		return fmt.Sprintf("Mode: localhost only, port %d", port)
 	}
-	return fmt.Sprintf("Mode: %s, port %d", mode, app.cfg.Port)
+
+	// The user needs the actual address to type into another device, not
+	// just confirmation that LAN mode is on — 0.0.0.0 (what BindAddr
+	// actually binds) isn't reachable from anywhere else.
+	ip, err := lanAddr()
+	if err != nil {
+		return fmt.Sprintf("Mode: LAN, port %d", port)
+	}
+	return fmt.Sprintf("Mode: LAN — http://%s:%d", ip, port)
 }
 
 func (app *App) setStatus(text string) {

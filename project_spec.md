@@ -126,7 +126,7 @@ A background HTTP server that a user can only start by double-clicking, with no 
 - Runs with a **system tray / menu bar icon** (e.g. via a cross-platform Go systray library).
 - The tray menu shows, at a glance:
   - Current status (running/stopped)
-  - Current bind mode (`localhost only` or `LAN`) and port
+  - Current bind mode (`localhost only` or `LAN`) and port; in LAN mode, the full address (e.g. `http://192.168.1.20:8080`) so the user has what they actually need to type into another device, not just confirmation that LAN mode is on
   - **Open in browser** shortcut
   - Toggle between `localhost only` and `LAN` (requires a restart of the listener, done in-process)
   - **Start automatically on login** toggle

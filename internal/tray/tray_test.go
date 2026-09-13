@@ -2,6 +2,8 @@ package tray
 
 import (
 	"bytes"
+	"errors"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -10,14 +12,39 @@ import (
 )
 
 func TestModeLabel(t *testing.T) {
+	orig := lanAddr
+	lanAddr = func() (string, error) { return "192.168.1.50", nil }
+	defer func() { lanAddr = orig }()
+
 	app := &App{cfg: config.Config{BindMode: config.BindModeLocalhost, Port: 8080}}
 	if got := app.modeLabel(); got != "Mode: localhost only, port 8080" {
 		t.Fatalf("unexpected label: %q", got)
 	}
 
 	app.cfg.BindMode = config.BindModeLAN
-	if got := app.modeLabel(); got != "Mode: LAN, port 8080" {
+	if got := app.modeLabel(); got != "Mode: LAN — http://192.168.1.50:8080" {
 		t.Fatalf("unexpected label: %q", got)
+	}
+}
+
+func TestModeLabel_FallsBackWhenLANAddressUnavailable(t *testing.T) {
+	orig := lanAddr
+	lanAddr = func() (string, error) { return "", errors.New("no route") }
+	defer func() { lanAddr = orig }()
+
+	app := &App{cfg: config.Config{BindMode: config.BindModeLAN, Port: 9090}}
+	if got := app.modeLabel(); got != "Mode: LAN, port 9090" {
+		t.Fatalf("unexpected label: %q", got)
+	}
+}
+
+func TestLanAddr_ReturnsAValidIPWhenARouteExists(t *testing.T) {
+	ip, err := lanAddr()
+	if err != nil {
+		t.Skipf("no outbound route available in this environment: %v", err)
+	}
+	if net.ParseIP(ip) == nil {
+		t.Fatalf("expected a valid IP address, got %q", ip)
 	}
 }
 
