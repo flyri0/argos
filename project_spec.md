@@ -299,7 +299,6 @@ The normal flow below (§6.2) assumes an already-trusted device exists to approv
 - On first startup — detected by an empty `devices` table — the server generates a **setup code** and prints it to stdout/the log file. In desktop mode, the tray icon also shows it directly. Because this code no longer expires on a timer, it must resist brute-forcing on its own: it's a random token of at least 8 alphanumeric characters (≈41+ bits of entropy), not a short human-typed PIN — the previous 15-minute window was doing real security work by limiting how many guesses were possible, and removing it means the token itself now has to carry that weight.
 - The code has **no time-based expiry**. It stays valid indefinitely — whether the user picks up their phone to pair it five seconds or five days after installing — until the moment a device actually presents it.
 - This is a dedicated endpoint, `POST /api/pairing/bootstrap` (§7.3), distinct from the per-device request/approve flow in §6.2. The first device that presents the correct code to it is auto-approved and becomes the first trusted device, recorded with the name `"First device"` (renamable later via `PATCH /api/devices/:id`) — no prior approval needed, since none can exist yet. That single use is what closes the window, not a clock: the code is consumed on first use and cannot pair a second device. Once `devices` is non-empty, this endpoint always responds `410 Gone` — bootstrap is permanently over for that installation, and every device after the first must go through normal approval (§6.2) from an already-trusted device.
-- Before anyone has paired, if the operator suspects the printed code was exposed, a CLI command (e.g. `argos setup regenerate-code`) invalidates it and prints a new one. This command only does anything meaningful while `devices` is still empty — once the first device has paired, bootstrap is over and there's no code left to regenerate.
 - This same mechanism covers desktop installs too — a user who never opens `localhost` locally and only ever accesses Argos from their phone over LAN still has a working bootstrap path, on their own schedule.
 
 ### 6.2 Subsequent devices
@@ -400,17 +399,17 @@ A living list — any new machine-readable error code introduced in code must be
 - [ ] Budgeting: assign amounts per category/month, correct rollover, correct overspending rule, "Available to Budget" calculation, zero-amount PUT deletes the row
 - [x] Monthly budget grid UI (budgeted / activity / available)
 - [x] Account register UI
-- [ ] API conventions applied consistently: response/error envelope, HTTP status codes, error code table (§7.1–§7.2)
+- [x] API conventions applied consistently: response/error envelope, HTTP status codes, error code table (§7.1–§7.2)
 - [x] Go binary with embedded frontend (`embed.FS`), single-command build
 - [x] SQLite persistence on the server
-- [ ] PWA: installable, offline-capable via IndexedDB + outbox + `/sync`
+- [x] PWA: installable, offline-capable via IndexedDB + outbox + `/sync`
 - [x] Sync conflict resolution via Hybrid Logical Clock (physical + counter + node id), not raw client timestamps
 - [x] Sync push: exact wire format from §2.4, per-mutation success/failure reporting, explicit atomic groups for transfers and category/payee reassignment
 - [x] Schema version mismatch: sync pauses with an "update required" notice, local offline use keeps working
 - [x] Desktop mode: tray icon with status, bind-mode toggle, start-on-login, clean quit
 - [x] Headless mode: CLI flags, config file, service installation (systemd/launchd/Windows Service)
 - [x] i18n scaffolding in place (English as default locale; server emits English-only error codes/messages, frontend owns all translation)
-- [ ] Device pairing: first-device bootstrap via high-entropy setup code (no expiry, rate-limited), approval flow for subsequent devices, rename, token issuance, device list + revocation, localhost bypass
+- [x] Device pairing: first-device bootstrap via high-entropy setup code (no expiry, rate-limited), approval flow for subsequent devices, rename, token issuance, device list + revocation, localhost bypass
 
 ## 9. Suggested repo structure
 
