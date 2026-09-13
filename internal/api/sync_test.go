@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"argos/internal/db"
 )
@@ -179,5 +181,75 @@ func TestSync_DeleteMutation(t *testing.T) {
 	}
 	if found == nil || found.DeletedAt == nil {
 		t.Fatalf("expected payee change with deleted_at set, got %+v", found)
+	}
+}
+
+func TestSync_StaleMutationRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "payees", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333", "name": "Landlord",
+				"hlc_physical": 2000, "hlc_counter": 5, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	// A second write with an HLC equal to (not just less than) the existing
+	// row's must also be rejected as stale (§2.3's "greater or equal" rule).
+	resp := postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "payees", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333", "name": "Landlord (stale rename)",
+				"hlc_physical": 2000, "hlc_counter": 5, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	if resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected rejected_stale, got %+v", resp.Results[0])
+	}
+	if resp.Results[0].Error != nil {
+		t.Fatalf("rejected_stale must not carry an error object (§2.4), got %+v", resp.Results[0].Error)
+	}
+
+	// The stale mutation must not have overwritten the row.
+	resp2 := postSync(t, h, `{"since": 0, "mutations": []}`)
+	var found *syncRowPayee
+	for _, c := range resp2.Changes {
+		if c.Table == "payees" {
+			b, _ := json.Marshal(c.Row)
+			var p syncRowPayee
+			json.Unmarshal(b, &p)
+			found = &p
+		}
+	}
+	if found == nil || found.Name != "Landlord" {
+		t.Fatalf("expected stale mutation to leave row unchanged, got %+v", found)
+	}
+}
+
+func TestSync_ClockSkewTooLargeRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+
+	farFuture := time.Now().Add(10 * time.Minute).UnixMilli()
+	resp := postSync(t, h, fmt.Sprintf(`{
+		"since": 0,
+		"mutations": [
+			{"table": "payees", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333", "name": "Landlord",
+				"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`, farFuture))
+
+	if resp.Results[0].Status != "rejected_invalid" || resp.Results[0].Error == nil || resp.Results[0].Error.Code != "CLOCK_SKEW_TOO_LARGE" {
+		t.Fatalf("expected rejected_invalid/CLOCK_SKEW_TOO_LARGE, got %+v", resp.Results[0])
+	}
+	if len(resp.Changes) != 0 {
+		t.Fatalf("expected no changes committed from a clock-skewed mutation, got %d", len(resp.Changes))
 	}
 }

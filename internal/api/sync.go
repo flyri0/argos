@@ -6,9 +6,31 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"argos/internal/db"
+	"argos/internal/sync"
 )
+
+// maxClockSkew is the bound (§2.3) beyond which an incoming HLC's physical
+// component is rejected rather than trusted: a device this far ahead of the
+// server's own clock is treated as badly drifted rather than silently
+// allowed to win every future conflict.
+const maxClockSkew = 5 * time.Minute
+
+// errRejectedStale signals that an existing row's HLC was greater than or
+// equal to the incoming mutation's (§2.3) — expected conflict-resolution
+// behavior, not an error, so it is reported as "rejected_stale" rather than
+// via the "rejected_invalid" + error-object shape (§2.4).
+var errRejectedStale = errors.New("existing row has a greater or equal HLC")
+
+// clockSkewError signals an incoming HLC whose physical component is more
+// than maxClockSkew ahead of the server's own clock — reported as
+// "rejected_invalid" with error code CLOCK_SKEW_TOO_LARGE (§7.2) rather
+// than the generic SYNC_MUTATION_INVALID.
+type clockSkewError struct{ msg string }
+
+func (e *clockSkewError) Error() string { return e.msg }
 
 // SyncHandler implements POST /sync (§2.4), backed by internal/db.
 type SyncHandler struct {
@@ -76,10 +98,11 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	units := groupMutations(req.Mutations)
+	now := time.Now()
 
 	results := make([]syncResult, 0, len(units))
 	for _, u := range units {
-		results = append(results, h.applyUnit(r.Context(), u))
+		results = append(results, h.applyUnit(r.Context(), u, now))
 	}
 
 	serverVersion, err := db.CurrentServerVersion(r.Context(), h.DB)
@@ -140,7 +163,7 @@ func rowID(row json.RawMessage) string {
 // applyUnit applies every mutation in u within one transaction: all succeed
 // together, or the whole unit is reported as a single "rejected_invalid"
 // result and none of its mutations take effect (§2.3).
-func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit) syncResult {
+func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) syncResult {
 	tx, err := h.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "INTERNAL_ERROR", Message: err.Error()}}
@@ -148,7 +171,17 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit) syncResult {
 	defer tx.Rollback()
 
 	for _, m := range u.mutations {
-		if err := applyMutation(ctx, tx, m); err != nil {
+		err := applyMutation(ctx, tx, m, now)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errRejectedStale):
+			return syncResult{Table: u.table, ID: u.id, Status: "rejected_stale"}
+		default:
+			var skew *clockSkewError
+			if errors.As(err, &skew) {
+				return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "CLOCK_SKEW_TOO_LARGE", Message: skew.Error()}}
+			}
 			return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "SYNC_MUTATION_INVALID", Message: err.Error()}}
 		}
 	}
@@ -160,14 +193,20 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit) syncResult {
 	return syncResult{Table: u.table, ID: u.id, Status: "applied"}
 }
 
-// applyMutation validates and applies one mutation's row within tx. Any
-// returned error means the row was structurally invalid or referenced a
-// row that doesn't exist (§2.3) — never a raw SQL error leaking out, since
-// every reachable failure here is meant to become a SYNC_MUTATION_INVALID
-// result rather than a 500.
-func applyMutation(ctx context.Context, tx *sql.Tx, m syncMutation) error {
+// applyMutation validates and applies one mutation's row within tx. A
+// returned error is one of: errRejectedStale (§2.3, becomes
+// "rejected_stale"), *clockSkewError (becomes "rejected_invalid" +
+// CLOCK_SKEW_TOO_LARGE), or any other error meaning the row was
+// structurally invalid or referenced a row that doesn't exist (becomes
+// "rejected_invalid" + SYNC_MUTATION_INVALID) — never a raw SQL error
+// leaking out as a 500.
+func applyMutation(ctx context.Context, tx *sql.Tx, m syncMutation, now time.Time) error {
 	if !db.IsSyncTable(m.Table) {
 		return errors.New("unknown table: " + m.Table)
+	}
+
+	if err := checkIncomingHLC(ctx, tx, m, now); err != nil {
+		return err
 	}
 
 	switch m.Op {
@@ -178,6 +217,48 @@ func applyMutation(ctx context.Context, tx *sql.Tx, m syncMutation) error {
 	default:
 		return errors.New("unknown op: " + m.Op)
 	}
+}
+
+// checkIncomingHLC applies the two HLC-based safeguards (§2.3) that must run
+// before a mutation's row is otherwise validated or applied: reject an
+// incoming HLC whose physical component is too far ahead of the server's own
+// clock, and reject (as stale, not invalid) a mutation whose HLC does not
+// order strictly after the existing row's. A row that fails to parse its id
+// or HLC fields here is left for the table-specific apply*/validate step
+// below to report with its usual, more specific error message.
+func checkIncomingHLC(ctx context.Context, tx *sql.Tx, m syncMutation, now time.Time) error {
+	var probe struct {
+		ID          string `json:"id"`
+		HLCPhysical *int64 `json:"hlc_physical"`
+		HLCCounter  *int64 `json:"hlc_counter"`
+		HLCNodeID   string `json:"hlc_node_id"`
+	}
+	if err := json.Unmarshal(m.Row, &probe); err != nil || probe.HLCPhysical == nil || probe.HLCCounter == nil || probe.HLCNodeID == "" {
+		return nil
+	}
+
+	if time.UnixMilli(*probe.HLCPhysical).After(now.Add(maxClockSkew)) {
+		return &clockSkewError{msg: "hlc_physical is more than 5 minutes ahead of the server's clock"}
+	}
+
+	if !uuidPattern.MatchString(probe.ID) {
+		return nil
+	}
+
+	existing, found, err := db.GetRowHLCTx(ctx, tx, m.Table, probe.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+
+	incoming := sync.HLC{Physical: *probe.HLCPhysical, Counter: *probe.HLCCounter, NodeID: probe.HLCNodeID}
+	existingHLC := sync.HLC{Physical: existing.Physical, Counter: existing.Counter, NodeID: existing.NodeID}
+	if sync.Compare(existingHLC, incoming) >= 0 {
+		return errRejectedStale
+	}
+	return nil
 }
 
 func applyDelete(ctx context.Context, tx *sql.Tx, table string, row json.RawMessage) error {

@@ -35,6 +35,30 @@ func IsSyncTable(table string) bool {
 	return syncTables[table]
 }
 
+// SyncRowHLC is the current HLC triple of an existing syncable row, used to
+// compare against an incoming mutation before applying it (§2.3).
+type SyncRowHLC struct {
+	Physical int64
+	Counter  int64
+	NodeID   string
+}
+
+// GetRowHLCTx returns the current HLC of the row with the given id in table,
+// and whether such a row exists at all — a tombstone (deleted_at set) still
+// carries a real HLC that a stale incoming mutation must not override, so
+// deleted rows count as found. table must be one of syncTables.
+func GetRowHLCTx(ctx context.Context, tx *sql.Tx, table, id string) (SyncRowHLC, bool, error) {
+	var h SyncRowHLC
+	err := tx.QueryRowContext(ctx, `SELECT hlc_physical, hlc_counter, hlc_node_id FROM `+table+` WHERE id = ?`, id).Scan(&h.Physical, &h.Counter, &h.NodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SyncRowHLC{}, false, nil
+	}
+	if err != nil {
+		return SyncRowHLC{}, false, err
+	}
+	return h, true, nil
+}
+
 // SyncDelete carries the fields a /sync delete mutation's row supplies for
 // any table (§2.4): the tombstone columns are identical across every
 // syncable table, so one shape covers all of them.
