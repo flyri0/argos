@@ -56,9 +56,7 @@ type syncMutation struct {
 	Row     json.RawMessage `json:"row"`
 }
 
-// syncResponse is the exact response shape from §2.4. SyncID and
-// SchemaVersion are placeholder/zero values in this milestone — wiring them
-// to server_meta is Milestone 13.
+// syncResponse is the exact response shape from §2.4.
 type syncResponse struct {
 	ServerVersion int64        `json:"server_version"`
 	SyncID        string       `json:"sync_id"`
@@ -111,6 +109,12 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	meta, err := db.GetOrInitServerMeta(r.Context(), h.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+
 	changes, err := h.changesSince(r.Context(), req.Since)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
@@ -119,8 +123,8 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, syncResponse{
 		ServerVersion: serverVersion,
-		SyncID:        "",
-		SchemaVersion: 0,
+		SyncID:        meta.SyncID,
+		SchemaVersion: meta.SchemaVersion,
 		Results:       results,
 		Changes:       changes,
 	})

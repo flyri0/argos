@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"argos/internal/db"
 )
 
@@ -251,5 +253,28 @@ func TestSync_ClockSkewTooLargeRejected(t *testing.T) {
 	}
 	if len(resp.Changes) != 0 {
 		t.Fatalf("expected no changes committed from a clock-skewed mutation, got %d", len(resp.Changes))
+	}
+}
+
+func TestSync_ServerMetaGeneratedOnceAndStable(t *testing.T) {
+	h := newTestSyncHandler(t)
+
+	resp1 := postSync(t, h, `{"since": 0, "mutations": []}`)
+	if resp1.SyncID == "" {
+		t.Fatalf("expected a non-empty sync_id on first sync, got %+v", resp1)
+	}
+	if _, err := uuid.Parse(resp1.SyncID); err != nil {
+		t.Fatalf("expected sync_id to be a uuid, got %q: %v", resp1.SyncID, err)
+	}
+	if resp1.SchemaVersion != 1 {
+		t.Fatalf("expected schema_version 1 on first sync, got %d", resp1.SchemaVersion)
+	}
+
+	resp2 := postSync(t, h, `{"since": 0, "mutations": []}`)
+	if resp2.SyncID != resp1.SyncID {
+		t.Fatalf("expected sync_id to stay stable across syncs, got %q then %q", resp1.SyncID, resp2.SyncID)
+	}
+	if resp2.SchemaVersion != resp1.SchemaVersion {
+		t.Fatalf("expected schema_version to stay stable across syncs, got %d then %d", resp1.SchemaVersion, resp2.SchemaVersion)
 	}
 }
