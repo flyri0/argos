@@ -18,22 +18,34 @@ const SYNC_INTERVAL_MS = 10_000;
 // changed elsewhere). Returns a cleanup function for the component that
 // started it.
 export function startSyncWorker(): () => void {
-  const trigger = () => {
+  // The "online" event IS the browser's own signal that connectivity just
+  // came back, so it always syncs unconditionally rather than re-checking
+  // navigator.onLine — that property isn't guaranteed to already reflect
+  // the new state by the time this handler runs (jsdom's synthetic event
+  // in tests never flips it at all, since nothing else does that for it).
+  const handleOnline = () => {
+    void runSync();
+  };
+
+  // The periodic poll and a regained-visibility check have no such direct
+  // signal, so both actually need to ask navigator.onLine first to avoid
+  // a pointless request while offline.
+  const triggerIfOnline = () => {
     if (navigator.onLine) void runSync();
   };
 
   const handleVisibility = () => {
-    if (document.visibilityState === "visible") trigger();
+    if (document.visibilityState === "visible") triggerIfOnline();
   };
 
-  window.addEventListener("online", trigger);
+  window.addEventListener("online", handleOnline);
   document.addEventListener("visibilitychange", handleVisibility);
-  const intervalId = window.setInterval(trigger, SYNC_INTERVAL_MS);
+  const intervalId = window.setInterval(triggerIfOnline, SYNC_INTERVAL_MS);
 
-  if (navigator.onLine) trigger();
+  if (navigator.onLine) handleOnline();
 
   return () => {
-    window.removeEventListener("online", trigger);
+    window.removeEventListener("online", handleOnline);
     document.removeEventListener("visibilitychange", handleVisibility);
     window.clearInterval(intervalId);
   };
