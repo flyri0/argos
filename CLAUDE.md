@@ -28,6 +28,9 @@ ambiguous or missing, stop and ask instead of guessing a default.
   (§4). Never return pre-translated text from the server.
 - Category/payee deletion requires `reassign_to` when in use (§5.4) —
   never leave a dangling reference.
+- Errors always follow the envelope and status codes in §7.1/§7.2. Any
+  new error code is added to §7.2 in the same commit — never left
+  undocumented.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`,
   `test:`. One commit per completed milestone, not per file.
 - Comments explain *why*, not *what*, only where reasoning isn't obvious
