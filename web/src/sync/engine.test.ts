@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/db";
 import { outbox } from "../db/helpers";
 import type { Account } from "../db/types";
-import { getCursor } from "./cursor";
+import { getCursor, getSyncId } from "./cursor";
 import { runSync } from "./engine";
 import { getSyncStatus } from "./status";
 
@@ -229,6 +229,55 @@ describe("runSync", () => {
     await runSync();
 
     expect(getSyncStatus().schemaMismatch).toBe(false);
+  });
+
+  it("remembers the server's sync_id from the first response it sees", async () => {
+    vi.mocked(fetch).mockResolvedValue(okResponse(baseServerBody({ sync_id: "sync-1" })));
+
+    await runSync();
+
+    expect(getSyncId()).toBe("sync-1");
+  });
+
+  it("discards a mismatched response and re-downloads from scratch when the server's sync_id changes", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      okResponse(baseServerBody({ sync_id: "sync-1", server_version: 5 })),
+    );
+    await runSync();
+    expect(getSyncId()).toBe("sync-1");
+    expect(getCursor()).toBe(5);
+
+    const staleChange = makeAccount({ name: "From before the reset", server_version: 50 });
+    const freshChange = makeAccount({ name: "From after the reset", server_version: 3 });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        okResponse(
+          baseServerBody({
+            sync_id: "sync-2",
+            server_version: 50,
+            changes: [{ table: "accounts", row: staleChange }],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        okResponse(
+          baseServerBody({
+            sync_id: "sync-2",
+            server_version: 3,
+            changes: [{ table: "accounts", row: freshChange }],
+          }),
+        ),
+      );
+
+    await runSync();
+
+    expect(getSyncId()).toBe("sync-2");
+    expect(getCursor()).toBe(3);
+    expect(await db.accounts.get(staleChange.id)).toBeUndefined();
+    expect(await db.accounts.get(freshChange.id)).toEqual(freshChange);
+
+    const retryCall = vi.mocked(fetch).mock.calls[2];
+    expect(JSON.parse(retryCall[1]?.body as string)).toMatchObject({ since: 0 });
   });
 
   it("leaves the outbox and cursor untouched when the request fails outright", async () => {

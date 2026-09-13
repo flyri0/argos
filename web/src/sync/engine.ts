@@ -12,7 +12,7 @@ import type {
   SyncMeta,
   Transaction,
 } from "../db/types";
-import { getCursor, setCursor } from "./cursor";
+import { getCursor, getSyncId, setCursor, setSyncId } from "./cursor";
 import { setSchemaMismatch } from "./status";
 
 // The schema_version this build of the client knows how to sync with
@@ -142,6 +142,7 @@ export async function runSync(): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.onLine === false) return;
 
   syncing = true;
+  let needsResync = false;
   try {
     const pending = await outbox.listUnsynced();
     const units = groupOutboxEntries(pending);
@@ -172,6 +173,23 @@ export async function runSync(): Promise<void> {
     }
     setSchemaMismatch(false);
 
+    // §2.3/§5.2: sync_id only changes on an explicit server-side reset (e.g.
+    // a restore from backup), meaning this response's `changes` were
+    // computed against a `since` cursor from a history we no longer share.
+    // Unlike a schema mismatch, this is fully recoverable on our own: store
+    // the new sync_id, reset the cursor to re-download from scratch, and
+    // retry immediately rather than merging or waiting for a UI action.
+    const storedSyncId = getSyncId();
+    if (storedSyncId !== null && storedSyncId !== body.sync_id) {
+      setSyncId(body.sync_id);
+      setCursor(0);
+      needsResync = true;
+      return;
+    }
+    if (storedSyncId === null) {
+      setSyncId(body.sync_id);
+    }
+
     for (const change of body.changes) {
       await applyChange(change);
     }
@@ -180,4 +198,5 @@ export async function runSync(): Promise<void> {
   } finally {
     syncing = false;
   }
+  if (needsResync) await runSync();
 }
