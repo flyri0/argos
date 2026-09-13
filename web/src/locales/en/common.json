@@ -8,6 +8,8 @@
   "nav.budget": "Budget",
   "nav.settings": "Settings",
 
+  "settings.language": "Language",
+
   "accounts.empty": "No accounts yet.",
   "accounts.add": "Add account",
   "accounts.newTitle": "New account",

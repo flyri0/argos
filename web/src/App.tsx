@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import { AccountsScreen } from "./features/accounts/AccountsScreen";
 import { BudgetScreen } from "./features/budget/BudgetScreen";
 import { CategoriesScreen } from "./features/categories/CategoriesScreen";
-import { DevicesScreen } from "./features/devices/DevicesScreen";
 import { PayeesScreen } from "./features/payees/PayeesScreen";
+import { SettingsScreen } from "./features/settings/SettingsScreen";
 import { startSyncWorker } from "./sync";
 import { SyncNotice } from "./sync/SyncNotice";
 
@@ -48,7 +48,7 @@ function App() {
         {tab === "budget" && <BudgetScreen />}
         {tab === "categories" && <CategoriesScreen />}
         {tab === "payees" && <PayeesScreen />}
-        {tab === "settings" && <DevicesScreen />}
+        {tab === "settings" && <SettingsScreen />}
       </main>
     </div>
   );
