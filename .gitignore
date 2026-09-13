@@ -1,0 +1,9 @@
+# The built frontend is written directly into internal/webui/dist by
+# `npm run build` (web/vite.config.ts's build.outDir) for embed.FS to pick
+# up (§2.1). Only the placeholder index.html is committed, so `go build`
+# and `go test` always work even before the real frontend has been built.
+internal/webui/dist/*
+!internal/webui/dist/index.html
+
+# `make build`/`make backend` output (Makefile).
+/bin/

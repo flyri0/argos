@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -14,7 +15,9 @@ import (
 // pairing endpoints themselves, which exist precisely to let an unpaired
 // device obtain a token in the first place. /sync and /health are top-level
 // paths outside /api/* (§7.3) and are therefore untouched by this wrapping.
-func NewRouter(conn *sql.DB) (http.Handler, error) {
+// frontend is the embedded PWA build (§2.1, internal/webui.Dist()), served
+// for every route this mux doesn't otherwise claim.
+func NewRouter(conn *sql.DB, frontend fs.FS) (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	RegisterAccountRoutes(mux, conn)
@@ -27,6 +30,7 @@ func NewRouter(conn *sql.DB) (http.Handler, error) {
 	if err := RegisterPairingRoutes(mux, conn); err != nil {
 		return nil, err
 	}
+	RegisterFrontendRoutes(mux, frontend)
 
 	return wrapDeviceAuth(mux, conn), nil
 }

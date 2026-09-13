@@ -20,6 +20,7 @@ import (
 	"argos/internal/db"
 	"argos/internal/service"
 	"argos/internal/tray"
+	"argos/internal/webui"
 )
 
 func main() {
@@ -155,7 +156,11 @@ func runServe(args []string, stdout io.Writer) error {
 	}
 	defer conn.Close()
 
-	router, err := api.NewRouter(conn)
+	frontend, err := webui.Dist()
+	if err != nil {
+		return fmt.Errorf("loading embedded frontend: %w", err)
+	}
+	router, err := api.NewRouter(conn, frontend)
 	if err != nil {
 		return fmt.Errorf("building router: %w", err)
 	}

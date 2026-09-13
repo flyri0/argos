@@ -105,6 +105,21 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # §2.1: go build alone would embed only the committed placeholder
+      # (internal/webui/dist/index.html) — the real frontend has to be
+      # built first so these release binaries embed the actual app.
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}

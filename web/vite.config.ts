@@ -5,6 +5,15 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  build: {
+    // §2.1: the Go binary embeds this build via embed.FS
+    // (internal/webui/webui.go). embed.FS can only embed files within or
+    // below the directory containing the //go:embed directive, and web/
+    // isn't a subdirectory of internal/webui — so the build has to land
+    // there directly rather than in the usual web/dist.
+    outDir: '../internal/webui/dist',
+    emptyOutDir: true,
+  },
   plugins: [
     react(),
     // §2.2: "manifest.json + a service worker ... caches the app shell so

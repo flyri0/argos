@@ -4,14 +4,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	"argos/internal/auth"
 	"argos/internal/db"
 )
 
+// testFrontend stands in for the real embedded build (internal/webui)
+// in these router-level tests, which only care about request routing and
+// auth, not actual frontend content.
+func testFrontend() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>test</title>")},
+	}
+}
+
 func TestNewRouter_ProtectsApiRoutesFromNonLocalhost(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn)
+	router, err := NewRouter(conn, testFrontend())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -28,7 +38,7 @@ func TestNewRouter_ProtectsApiRoutesFromNonLocalhost(t *testing.T) {
 
 func TestNewRouter_LocalhostReachesApiRoutesWithoutAToken(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn)
+	router, err := NewRouter(conn, testFrontend())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -45,7 +55,7 @@ func TestNewRouter_LocalhostReachesApiRoutesWithoutAToken(t *testing.T) {
 
 func TestNewRouter_ValidDeviceTokenReachesApiRoutes(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn)
+	router, err := NewRouter(conn, testFrontend())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -75,7 +85,7 @@ func TestNewRouter_ValidDeviceTokenReachesApiRoutes(t *testing.T) {
 
 func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 	conn := newTestDB(t)
-	router, err := NewRouter(conn)
+	router, err := NewRouter(conn, testFrontend())
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -98,5 +108,28 @@ func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 
 	if pollW.Code == http.StatusForbidden {
 		t.Fatalf("expected the pairing poll route to stay reachable without a device token, got 403: %s", pollW.Body.String())
+	}
+}
+
+func TestNewRouter_FrontendServedWithoutADeviceToken(t *testing.T) {
+	conn := newTestDB(t)
+	router, err := NewRouter(conn, testFrontend())
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+
+	// An unpaired device (non-localhost, no token) still needs to load the
+	// app shell to reach the pairing screen in the first place (§6.2), so
+	// the frontend must never sit behind auth.Middleware.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 serving the frontend without a token, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "<!doctype html><title>test</title>" {
+		t.Fatalf("expected the embedded frontend's index.html, got %q", w.Body.String())
 	}
 }
