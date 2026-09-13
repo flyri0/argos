@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"argos/internal/db"
 )
@@ -178,5 +179,147 @@ func TestPairingBootstrap_NoCodePrintedWhenDevicesAlreadyExist(t *testing.T) {
 	w, _ := postBootstrap(t, h2, m[1])
 	if w.Code != http.StatusGone {
 		t.Fatalf("expected 410 from a restarted handler with devices already paired, got %d", w.Code)
+	}
+}
+
+func postRequestPairing(t *testing.T, h *PairingHandler) (*httptest.ResponseRecorder, requestPairingResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/request", nil)
+	w := httptest.NewRecorder()
+	h.Request(w, req)
+
+	var resp requestPairingResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	return w, resp
+}
+
+func postApprove(t *testing.T, h *PairingHandler, code string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(approveRequest{Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/approve", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:1234" // localhost implicitly trusted, per §6.2
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+	return w
+}
+
+func TestPairingRequest_ReturnsFourDigitCodeExpiringInTenMinutes(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+
+	w, resp := postRequestPairing(t, h)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(resp.Code) != 4 {
+		t.Fatalf("expected a 4-digit code, got %q", resp.Code)
+	}
+	for _, c := range resp.Code {
+		if c < '0' || c > '9' {
+			t.Fatalf("expected an all-numeric code, got %q", resp.Code)
+		}
+	}
+
+	wantExpiry := time.Now().Add(10 * time.Minute).Unix()
+	if diff := resp.ExpiresAt - wantExpiry; diff < -2 || diff > 2 {
+		t.Fatalf("expected expires_at ~%d (now+10m), got %d", wantExpiry, resp.ExpiresAt)
+	}
+}
+
+func TestPairingApprove_CorrectCodeCreatesUnnamedDevice(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	w := postApprove(t, h, reqResp.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp bootstrapResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Name != "Unnamed device" {
+		t.Fatalf("expected name %q, got %q", "Unnamed device", resp.Name)
+	}
+	if resp.ID == "" || resp.Token == "" {
+		t.Fatalf("expected non-empty id and token, got %+v", resp)
+	}
+}
+
+func TestPairingApprove_CodeIsSingleUse(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	if w := postApprove(t, h, reqResp.Code); w.Code != http.StatusCreated {
+		t.Fatalf("expected first approve to succeed, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Re-presenting the same code must fail, not silently mint a second
+	// device — the code is consumed on first (correct) use.
+	w := postApprove(t, h, reqResp.Code)
+	if w.Code == http.StatusCreated {
+		t.Fatalf("expected re-using a consumed pairing code to fail")
+	}
+}
+
+func TestPairingApprove_UnknownCodeRejected(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+
+	w := postApprove(t, h, "0000")
+	if w.Code == http.StatusCreated {
+		t.Fatalf("expected an unknown code to be rejected, got 201")
+	}
+}
+
+func TestPairingApprove_LockoutAfterFiveFailedAttempts(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+
+	for i := 0; i < 5; i++ {
+		w := postApprove(t, h, "9999")
+		if w.Code == http.StatusCreated {
+			t.Fatalf("attempt %d: expected wrong code to be rejected", i+1)
+		}
+	}
+
+	// A correct code presented immediately after must still be rejected —
+	// the source is now within its 1-minute lockout (§6.3), same rule as
+	// bootstrap.
+	_, reqResp := postRequestPairing(t, h)
+	w := postApprove(t, h, reqResp.Code)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 during lockout, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPairingApprove_ExpiredCodeRejected(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	// Force the code to look expired by rewriting its expiry directly,
+	// rather than sleeping 10 real minutes in a test.
+	h.pendingMu.Lock()
+	h.pending[reqResp.Code] = pendingCode{expiresAt: time.Now().Add(-time.Second)}
+	h.pendingMu.Unlock()
+
+	w := postApprove(t, h, reqResp.Code)
+	if w.Code == http.StatusCreated {
+		t.Fatalf("expected an expired code to be rejected")
+	}
+}
+
+func TestPairingApprove_RequiresAuthFromNonLocalhost(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	body, _ := json.Marshal(approveRequest{Code: reqResp.Code})
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/approve", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.5:1234" // not localhost, no Authorization header
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp apiError
+	json.Unmarshal(w.Body.Bytes(), &errResp)
+	if errResp.Error.Code != "PAIRING_REQUIRED" {
+		t.Fatalf("expected PAIRING_REQUIRED, got %+v", errResp)
 	}
 }

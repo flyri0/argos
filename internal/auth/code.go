@@ -25,6 +25,22 @@ func GenerateSetupCode() (string, error) {
 	return randomString(setupCodeAlphabet, setupCodeLength)
 }
 
+// pairingCodeDigits is the alphabet for the short-lived §6.2 pairing code — a
+// human types this into an already-trusted device's approval prompt (spec
+// example: "4821"), so unlike the bootstrap code it favors being easy to
+// read and key in over raw entropy; the 10-minute expiry (§6.2) plus the
+// §6.3 lockout are what actually keep it safe from guessing.
+const pairingCodeDigits = "0123456789"
+
+// pairingCodeLength matches the 4-digit example in §6.2 exactly.
+const pairingCodeLength = 4
+
+// GeneratePairingCode returns a fresh random pairing code for the §6.2
+// subsequent-device flow.
+func GeneratePairingCode() (string, error) {
+	return randomString(pairingCodeDigits, pairingCodeLength)
+}
+
 // tokenBytes is the raw entropy (256 bits) behind a long-lived device
 // token (§6.2) before base64url encoding.
 const tokenBytes = 32
