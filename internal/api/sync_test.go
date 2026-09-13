@@ -256,6 +256,74 @@ func TestSync_ClockSkewTooLargeRejected(t *testing.T) {
 	}
 }
 
+func TestSync_SecondIncomeGroupRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "55555555-5555-5555-5555-555555555555", "name": "Income", "is_income": true, "sort_order": 0,
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	resp := postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "66666666-6666-6666-6666-666666666666", "name": "Other income", "is_income": true, "sort_order": 1,
+				"hlc_physical": 2000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	if resp.Results[0].Status != "rejected_invalid" || resp.Results[0].Error == nil || resp.Results[0].Error.Code != "SYNC_MUTATION_INVALID" {
+		t.Fatalf("expected second income group rejected_invalid/SYNC_MUTATION_INVALID, got %+v", resp.Results[0])
+	}
+}
+
+func TestSync_IncomeGroupCannotBeUnmarkedOrDeleted(t *testing.T) {
+	h := newTestSyncHandler(t)
+
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "55555555-5555-5555-5555-555555555555", "name": "Income", "is_income": true, "sort_order": 0,
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	unmark := postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "55555555-5555-5555-5555-555555555555", "name": "Income", "is_income": false, "sort_order": 0,
+				"hlc_physical": 2000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+	if unmark.Results[0].Status != "rejected_invalid" || unmark.Results[0].Error == nil || unmark.Results[0].Error.Code != "SYNC_MUTATION_INVALID" {
+		t.Fatalf("expected un-marking the income group rejected_invalid/SYNC_MUTATION_INVALID, got %+v", unmark.Results[0])
+	}
+
+	del := postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "delete", "group_id": null, "row": {
+				"id": "55555555-5555-5555-5555-555555555555", "deleted_at": 3000,
+				"hlc_physical": 3000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+	if del.Results[0].Status != "rejected_invalid" || del.Results[0].Error == nil || del.Results[0].Error.Code != "SYNC_MUTATION_INVALID" {
+		t.Fatalf("expected deleting the income group rejected_invalid/SYNC_MUTATION_INVALID, got %+v", del.Results[0])
+	}
+}
+
 func TestSync_ServerMetaGeneratedOnceAndStable(t *testing.T) {
 	h := newTestSyncHandler(t)
 

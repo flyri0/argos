@@ -73,8 +73,10 @@ type SyncDelete struct {
 // SyncDeleteRow soft-deletes the row with the given id in table, assigning
 // it a fresh server_version, regardless of whether it was already deleted
 // (a re-applied tombstone is a harmless no-op change). Returns ErrNotFound
-// if no row with that id exists in table at all. table must be one of
-// syncTables — callers check IsSyncTable before calling.
+// if no row with that id exists in table at all, or ErrIncomeGroupRequired
+// if table is "category_groups" and the row is the current income group
+// (§5.2: it cannot be deleted). table must be one of syncTables — callers
+// check IsSyncTable before calling.
 func SyncDeleteRow(ctx context.Context, tx *sql.Tx, table string, in SyncDelete) error {
 	exists, err := checkRowExistsTx(ctx, tx, table, in.ID)
 	if err != nil {
@@ -82,6 +84,18 @@ func SyncDeleteRow(ctx context.Context, tx *sql.Tx, table string, in SyncDelete)
 	}
 	if !exists {
 		return ErrNotFound
+	}
+
+	if table == "category_groups" {
+		var isIncome int64
+		var deletedAt sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT is_income, deleted_at FROM category_groups WHERE id = ?`, in.ID).Scan(&isIncome, &deletedAt)
+		if err != nil {
+			return err
+		}
+		if isIncome != 0 && !deletedAt.Valid {
+			return ErrIncomeGroupRequired
+		}
 	}
 
 	version, err := nextServerVersion(ctx, tx)
@@ -145,9 +159,44 @@ type SyncCategoryGroup struct {
 	HLCNodeID   string
 }
 
+// ErrIncomeGroupExists is returned by SyncUpsertCategoryGroup when the
+// mutation would mark a second, different category_groups row as income —
+// §5.2 requires exactly one income group to exist.
+var ErrIncomeGroupExists = errors.New("an income category group already exists")
+
+// ErrIncomeGroupRequired is returned by SyncUpsertCategoryGroup or
+// SyncDeleteRow when the mutation would leave zero income category groups —
+// either by un-marking the current one or deleting it. §5.2 states the
+// income group "cannot be deleted", and un-marking it is equivalent: both
+// leave the budget with no income group at all.
+var ErrIncomeGroupRequired = errors.New("the income category group cannot be deleted or unmarked")
+
 // SyncUpsertCategoryGroup inserts or fully replaces the category_groups row
-// identified by in.ID, assigning it a fresh server_version.
+// identified by in.ID, assigning it a fresh server_version. Returns
+// ErrIncomeGroupExists or ErrIncomeGroupRequired if the write would violate
+// §5.2's "exactly one income group" invariant.
 func SyncUpsertCategoryGroup(ctx context.Context, tx *sql.Tx, in SyncCategoryGroup) error {
+	if in.IsIncome {
+		var other string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM category_groups WHERE is_income = 1 AND deleted_at IS NULL AND id != ?`, in.ID).Scan(&other)
+		if err == nil {
+			return ErrIncomeGroupExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	} else {
+		var currentIsIncome int64
+		var deletedAt sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT is_income, deleted_at FROM category_groups WHERE id = ?`, in.ID).Scan(&currentIsIncome, &deletedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && currentIsIncome != 0 && !deletedAt.Valid {
+			return ErrIncomeGroupRequired
+		}
+	}
+
 	version, err := nextServerVersion(ctx, tx)
 	if err != nil {
 		return err
