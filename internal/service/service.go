@@ -1,8 +1,8 @@
 // Package service registers/removes Argos as a system service (§3.2), so
 // it starts with the system without requiring a logged-in user or a
-// tray. Linux (a systemd user unit, this file) and Windows (a Windows
-// Service, service_windows.go) are implemented; macOS (launchd) is a
-// separate follow-up milestone.
+// tray. Linux (a systemd user unit, this file), Windows (a Windows
+// Service, service_windows.go), and macOS (a launchd daemon, launchd.go)
+// are implemented.
 package service
 
 import (
@@ -39,14 +39,16 @@ func realRunner(name string, args ...string) error {
 }
 
 // Install registers Argos as a system service enabled to start on boot:
-// a systemd user unit on Linux, a Windows Service on Windows. Any other
-// OS is not yet supported (macOS/launchd is a separate follow-up).
+// a systemd user unit on Linux, a Windows Service on Windows, or a
+// launchd daemon on macOS. Any other OS is not yet supported.
 func Install() error {
 	switch runtime.GOOS {
 	case "linux":
 		return installLinux()
 	case "windows":
 		return installWindowsReal()
+	case "darwin":
+		return installDarwin()
 	default:
 		return ErrUnsupportedOS
 	}
@@ -59,6 +61,8 @@ func Uninstall() error {
 		return uninstallLinux()
 	case "windows":
 		return uninstallWindowsReal()
+	case "darwin":
+		return uninstallDarwin()
 	default:
 		return ErrUnsupportedOS
 	}
