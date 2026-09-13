@@ -9,3 +9,5 @@ export {
   budgetEntries,
   outbox,
 } from "./helpers";
+export { computeBalance } from "./balance";
+export { nextHlc, type HlcStamp } from "./hlc";

@@ -4,5 +4,31 @@
   "app.loading": "Loading…",
   "nav.accounts": "Accounts",
   "nav.budget": "Budget",
-  "nav.settings": "Settings"
+  "nav.settings": "Settings",
+
+  "accounts.empty": "No accounts yet.",
+  "accounts.add": "Add account",
+  "accounts.newTitle": "New account",
+  "accounts.editTitle": "Edit account",
+  "accounts.name": "Name",
+  "accounts.namePlaceholder": "e.g. Checking",
+  "accounts.nameRequired": "Name is required.",
+  "accounts.type": "Type",
+  "accounts.onBudget": "On budget",
+  "accounts.balance": "Balance",
+  "accounts.save": "Save",
+  "accounts.cancel": "Cancel",
+  "accounts.edit": "Edit",
+  "accounts.close": "Close",
+  "accounts.reopen": "Reopen",
+  "accounts.closedBadge": "Closed",
+  "accounts.confirmClose": "Close this account? It will no longer accept new transactions.",
+  "accounts.confirm": "Confirm",
+
+  "accountType.checking": "Checking",
+  "accountType.savings": "Savings",
+  "accountType.credit": "Credit",
+  "accountType.cash": "Cash",
+  "accountType.investment": "Investment",
+  "accountType.other": "Other"
 }
