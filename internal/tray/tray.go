@@ -24,6 +24,13 @@ import (
 	"argos/internal/config"
 )
 
+// SetupCodeFunc reports the live §6.1 bootstrap setup code and whether
+// it's still active — i.e. no device has paired yet, so the tray should
+// keep displaying it. Expressed as a func type rather than importing
+// internal/api's PairingHandler directly, so this package (which api never
+// imports back) stays decoupled from the pairing implementation.
+type SetupCodeFunc func(ctx context.Context) (code string, active bool, err error)
+
 // App owns the HTTP server's lifecycle for as long as the tray runs, so
 // it can restart the listener in-process when the user toggles bind mode
 // (§3.1) and stop it cleanly on Quit.
@@ -31,16 +38,18 @@ type App struct {
 	configPath string
 	handler    http.Handler
 	stdout     io.Writer
+	setupCode  SetupCodeFunc
 
 	mu         sync.Mutex
 	cfg        config.Config
 	srv        *http.Server
 	actualAddr string
 
-	statusItem *systray.MenuItem
-	modeItem   *systray.MenuItem
-	lanItem    *systray.MenuItem
-	loginItem  *systray.MenuItem
+	statusItem    *systray.MenuItem
+	modeItem      *systray.MenuItem
+	lanItem       *systray.MenuItem
+	loginItem     *systray.MenuItem
+	setupCodeItem *systray.MenuItem
 
 	startErr error
 }
@@ -48,8 +57,10 @@ type App struct {
 // Run starts the HTTP server, shows the tray icon, and blocks until the
 // user chooses Quit (or the process receives an interrupt/termination
 // signal), at which point it shuts the server down cleanly and returns.
-func Run(cfg config.Config, configPath string, handler http.Handler, stdout io.Writer) error {
-	app := &App{configPath: configPath, handler: handler, stdout: stdout, cfg: cfg}
+// setupCode is used to show the §6.1 bootstrap setup code in the tray while
+// it's still active; pass nil if it's not available (e.g. in tests).
+func Run(cfg config.Config, configPath string, handler http.Handler, stdout io.Writer, setupCode SetupCodeFunc) error {
+	app := &App{configPath: configPath, handler: handler, stdout: stdout, cfg: cfg, setupCode: setupCode}
 
 	if err := app.startServer(); err != nil {
 		return err
@@ -80,6 +91,17 @@ func (app *App) onReady() {
 	app.statusItem.Disable()
 	app.modeItem = systray.AddMenuItem(app.modeLabel(), "")
 	app.modeItem.Disable()
+
+	if app.setupCode != nil {
+		if code, active, err := app.setupCode(context.Background()); err != nil {
+			fmt.Fprintf(app.stdout, "argos: checking setup code: %v\n", err)
+		} else if active {
+			app.setupCodeItem = systray.AddMenuItem(fmt.Sprintf("Setup code: %s", code),
+				"Use this code to pair your first device (§6.1) — hidden again once a device has paired")
+			app.setupCodeItem.Disable()
+			go app.watchSetupCode()
+		}
+	}
 
 	systray.AddSeparator()
 
@@ -185,6 +207,27 @@ func (app *App) handleToggleStartOnLogin() {
 			continue
 		}
 		app.loginItem.Check()
+	}
+}
+
+// watchSetupCode hides setupCodeItem once bootstrap closes (§6.1: the code
+// stops mattering the instant the first device pairs). Pairing happens over
+// HTTP, outside this goroutine's control flow, so it polls rather than
+// being notified — and stops polling as soon as it observes the closed
+// state, since bootstrap never reopens for an installation.
+func (app *App) watchSetupCode() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		_, active, err := app.setupCode(context.Background())
+		if err != nil {
+			fmt.Fprintf(app.stdout, "argos: checking setup code: %v\n", err)
+			continue
+		}
+		if !active {
+			app.setupCodeItem.Hide()
+			return
+		}
 	}
 }
 

@@ -60,17 +60,36 @@ const pairingCodeTTL = 10 * time.Minute
 
 // RegisterPairingRoutes registers the device pairing endpoints. On first
 // startup (an empty devices table, §6.1) it generates the bootstrap setup
-// code and prints it to stdout.
-func RegisterPairingRoutes(mux *http.ServeMux, conn *sql.DB) error {
+// code and prints it to stdout. It returns the handler so callers outside
+// this package (desktop mode's tray, §6.1: "the tray icon also shows it
+// directly") can read the live setup code via PairingHandler.SetupCode.
+func RegisterPairingRoutes(mux *http.ServeMux, conn *sql.DB) (*PairingHandler, error) {
 	h, err := newPairingHandler(conn, os.Stdout)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mux.HandleFunc("POST /api/pairing/bootstrap", h.Bootstrap)
 	mux.HandleFunc("POST /api/pairing/request", h.Request)
 	mux.HandleFunc("POST /api/pairing/approve", h.Approve)
 	mux.HandleFunc("GET /api/pairing/request/{code}", h.Poll)
-	return nil
+	return h, nil
+}
+
+// SetupCode returns the live §6.1 bootstrap setup code and whether it's
+// still active. It re-checks the devices table on every call rather than
+// trusting a cached flag, the same way Bootstrap itself always re-checks
+// before accepting a code, so a caller polling this (e.g. the tray, to know
+// when to stop displaying the code) sees the moment bootstrap actually
+// closes rather than a stale in-memory snapshot.
+func (h *PairingHandler) SetupCode(ctx context.Context) (code string, active bool, err error) {
+	empty, err := db.DevicesEmpty(ctx, h.DB)
+	if err != nil {
+		return "", false, err
+	}
+	if !empty {
+		return "", false, nil
+	}
+	return h.code, true, nil
 }
 
 func newPairingHandler(conn *sql.DB, out io.Writer) (*PairingHandler, error) {

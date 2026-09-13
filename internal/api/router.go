@@ -17,7 +17,12 @@ import (
 // paths outside /api/* (§7.3) and are therefore untouched by this wrapping.
 // frontend is the embedded PWA build (§2.1, internal/webui.Dist()), served
 // for every route this mux doesn't otherwise claim.
-func NewRouter(conn *sql.DB, frontend fs.FS) (http.Handler, error) {
+//
+// The returned *Router satisfies http.Handler (it embeds one), so callers
+// that only need to serve requests can keep treating it as one; desktop
+// mode additionally reaches through Pairing to show the live §6.1 setup
+// code in the tray.
+func NewRouter(conn *sql.DB, frontend fs.FS) (*Router, error) {
 	mux := http.NewServeMux()
 
 	RegisterAccountRoutes(mux, conn)
@@ -27,12 +32,21 @@ func NewRouter(conn *sql.DB, frontend fs.FS) (http.Handler, error) {
 	RegisterBudgetRoutes(mux, conn)
 	RegisterDeviceRoutes(mux, conn)
 	RegisterSyncRoutes(mux, conn)
-	if err := RegisterPairingRoutes(mux, conn); err != nil {
+	RegisterHealthRoutes(mux)
+	pairing, err := RegisterPairingRoutes(mux, conn)
+	if err != nil {
 		return nil, err
 	}
 	RegisterFrontendRoutes(mux, frontend)
 
-	return wrapDeviceAuth(mux, conn), nil
+	return &Router{Handler: wrapDeviceAuth(mux, conn), Pairing: pairing}, nil
+}
+
+// Router is the assembled HTTP handler plus the components a caller outside
+// this package needs direct access to.
+type Router struct {
+	http.Handler
+	Pairing *PairingHandler
 }
 
 // wrapDeviceAuth routes each request either straight to mux, or through

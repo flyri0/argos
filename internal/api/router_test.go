@@ -111,6 +111,23 @@ func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestNewRouter_HealthReachableWithoutADeviceToken(t *testing.T) {
+	conn := newTestDB(t)
+	router, err := NewRouter(conn, testFrontend())
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /health without a device token, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestNewRouter_FrontendServedWithoutADeviceToken(t *testing.T) {
 	conn := newTestDB(t)
 	router, err := NewRouter(conn, testFrontend())

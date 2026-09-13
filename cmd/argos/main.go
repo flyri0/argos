@@ -169,7 +169,7 @@ func runServe(args []string, stdout io.Writer) error {
 		// Desktop mode (§3.1): the tray owns the HTTP server's lifecycle
 		// from here — it starts it, can restart it in-process when the
 		// user toggles bind mode, and stops it cleanly on Quit.
-		return tray.Run(cfg, path, router, stdout)
+		return tray.Run(cfg, path, router, stdout, router.Pairing.SetupCode)
 	}
 
 	addr := bindAddr(cfg)
