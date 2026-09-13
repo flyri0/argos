@@ -4,13 +4,15 @@
 // unit tested in isolation.
 package budget
 
-// Transaction is the minimal shape balance calculations need. It's
-// deliberately independent of internal/db's row type to keep this package
-// free of any DB-layer dependency.
+// Transaction is the minimal shape balance and envelope calculations need.
+// It's deliberately independent of internal/db's row type to keep this
+// package free of any DB-layer dependency.
 type Transaction struct {
-	AccountID string
-	Amount    int64
-	DeletedAt *int64
+	AccountID  string
+	CategoryID string
+	Date       string // "YYYY-MM-DD" (§5.1)
+	Amount     int64
+	DeletedAt  *int64
 }
 
 // AccountBalance sums the amount of every non-deleted transaction belonging
