@@ -9,18 +9,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"argos/internal/api"
 	"argos/internal/config"
 	"argos/internal/db"
 	"argos/internal/service"
+	"argos/internal/tray"
 )
 
 func main() {
@@ -115,16 +114,10 @@ func applyFlagOverrides(cfg config.Config, f flagOverrides) config.Config {
 	return cfg
 }
 
-// bindAddr resolves the actual listen address for cfg. bind_mode
-// "localhost" binds 127.0.0.1 only; "lan" binds 0.0.0.0 — §3.3 is explicit
-// that this must never happen silently, which is why it's driven entirely
-// by cfg.BindMode rather than defaulting to all-interfaces.
+// bindAddr resolves the actual listen address for cfg; see
+// config.Config.BindAddr.
 func bindAddr(cfg config.Config) string {
-	host := "127.0.0.1"
-	if cfg.BindMode == config.BindModeLAN {
-		host = "0.0.0.0"
-	}
-	return net.JoinHostPort(host, strconv.Itoa(cfg.Port))
+	return cfg.BindAddr()
 }
 
 // runServe implements "argos serve" (also reachable as bare flags with no
@@ -149,13 +142,6 @@ func runServe(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	if !f.headless {
-		// Desktop mode (§3.1) will initialize the system tray here once
-		// internal/tray exists. It doesn't yet, so desktop mode currently
-		// runs identically to headless mode — nothing calls tray code
-		// either way.
-	}
-
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data dir %s: %w", cfg.DataDir, err)
 	}
@@ -172,6 +158,13 @@ func runServe(args []string, stdout io.Writer) error {
 	router, err := api.NewRouter(conn)
 	if err != nil {
 		return fmt.Errorf("building router: %w", err)
+	}
+
+	if !f.headless {
+		// Desktop mode (§3.1): the tray owns the HTTP server's lifecycle
+		// from here — it starts it, can restart it in-process when the
+		// user toggles bind mode, and stops it cleanly on Quit.
+		return tray.Run(cfg, path, router, stdout)
 	}
 
 	addr := bindAddr(cfg)

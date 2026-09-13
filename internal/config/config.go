@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,19 @@ type Config struct {
 	BindMode BindMode `json:"bind_mode"`
 	Port     int      `json:"port"`
 	DataDir  string   `json:"data_dir"`
+}
+
+// BindAddr resolves the actual listen address for c. bind_mode
+// "localhost" binds 127.0.0.1 only; "lan" binds 0.0.0.0 — §3.3 is
+// explicit that this must never happen silently, which is why it's
+// driven entirely by c.BindMode rather than defaulting to
+// all-interfaces.
+func (c Config) BindAddr() string {
+	host := "127.0.0.1"
+	if c.BindMode == BindModeLAN {
+		host = "0.0.0.0"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }
 
 // Validate reports whether c holds values that are safe to run with.
@@ -109,6 +123,25 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Save writes cfg as the JSON config file at path, creating its parent
+// directory if needed. It's how a running desktop instance persists a
+// tray-driven change (e.g. toggling bind mode) back to the file Load
+// reads on the next start, per §3.3's "both modes read the same config
+// file."
+func Save(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("config: creating config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("config: encoding: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("config: writing %s: %w", path, err)
+	}
+	return nil
 }
 
 func applyEnvOverrides(cfg *Config) error {

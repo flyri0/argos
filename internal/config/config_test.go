@@ -23,6 +23,55 @@ func TestDefault_MatchesSpecDefaults(t *testing.T) {
 	}
 }
 
+func TestBindAddr_LocalhostBindsLoopbackOnly(t *testing.T) {
+	addr := Config{BindMode: BindModeLocalhost, Port: 8080}.BindAddr()
+	if addr != "127.0.0.1:8080" {
+		t.Fatalf("expected 127.0.0.1:8080, got %q", addr)
+	}
+}
+
+func TestBindAddr_LANBindsAllInterfaces(t *testing.T) {
+	addr := Config{BindMode: BindModeLAN, Port: 8080}.BindAddr()
+	if addr != "0.0.0.0:8080" {
+		t.Fatalf("expected 0.0.0.0:8080, got %q", addr)
+	}
+}
+
+func TestSave_RoundTripsThroughLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+	cfg := Config{BindMode: BindModeLAN, Port: 9090, DataDir: "/data"}
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != cfg {
+		t.Fatalf("expected Load to round-trip Save's output, got %+v, want %+v", got, cfg)
+	}
+}
+
+func TestSave_OverwritesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{BindMode: BindModeLocalhost, Port: 8080, DataDir: "/a"}); err != nil {
+		t.Fatalf("Save (first): %v", err)
+	}
+	if err := Save(path, Config{BindMode: BindModeLAN, Port: 9999, DataDir: "/b"}); err != nil {
+		t.Fatalf("Save (second): %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Port != 9999 || got.BindMode != BindModeLAN {
+		t.Fatalf("expected the second Save to overwrite the first, got %+v", got)
+	}
+}
+
 func TestLoad_NoFileReturnsDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.json")
 
