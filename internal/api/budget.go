@@ -39,6 +39,16 @@ type categoryBudget struct {
 	Available  int64  `json:"available"`
 }
 
+// monthBudget is GET /api/budget/{month}'s response envelope (§7.1: a
+// single logical resource, so an object rather than a bare array):
+// per-category figures alongside to_budget (§5.3), the one budgeting
+// figure that isn't scoped to a single category.
+type monthBudget struct {
+	Month      string           `json:"month"`
+	ToBudget   int64            `json:"to_budget"`
+	Categories []categoryBudget `json:"categories"`
+}
+
 // rollupCategory walks categoryID's full budget_entries/transaction history
 // up to and including month, applying internal/budget's Available() rule
 // (§5.3) forward from the earliest relevant month, so a rollover or an
@@ -100,6 +110,11 @@ func (h *BudgetHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]categoryBudget, 0, len(categories))
+	// Accumulated alongside the per-category rollup rather than in a second
+	// pass over the same entries: §5.3's "everything already budgeted
+	// across all months to date" means every non-deleted budget_entries row
+	// up to and including the requested month, across every category.
+	var budgetedToDate int64
 	for _, c := range categories {
 		entries, err := db.ListBudgetEntriesForCategory(r.Context(), h.DB, c.ID)
 		if err != nil {
@@ -112,8 +127,39 @@ func (h *BudgetHandler) Get(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out = append(out, rollupCategory(entries, transactions, c.ID, month))
+
+		for _, e := range entries {
+			if e.Month <= month {
+				budgetedToDate += e.Budgeted
+			}
+		}
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	accounts, err := db.ListAccounts(r.Context(), h.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	// §5.3: to_budget only counts on-budget accounts — off-budget balances
+	// (e.g. a tracked investment account) never affect what there is to budget.
+	balances := make([]int64, 0, len(accounts))
+	for _, a := range accounts {
+		if !a.OnBudget {
+			continue
+		}
+		balance, err := accountBalance(r.Context(), h.DB, a.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		balances = append(balances, balance)
+	}
+
+	writeJSON(w, http.StatusOK, monthBudget{
+		Month:      month,
+		ToBudget:   budget.ToBudget(balances, budgetedToDate),
+		Categories: out,
+	})
 }
 
 type setBudgetRequest struct {

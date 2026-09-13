@@ -1,4 +1,5 @@
-import type { BudgetEntry, Transaction } from "./types";
+import { computeBalance } from "./balance";
+import type { Account, BudgetEntry, Transaction } from "./types";
 
 // §5.3's budgeting engine, reimplemented in TypeScript so the monthly
 // budget grid can compute figures client-side without a round-trip —
@@ -87,4 +88,34 @@ export function rollupCategory(
     }
   }
   return result;
+}
+
+// Implements §5.3's "Available to Budget" total: the combined balance of
+// every on-budget, non-deleted account, minus everything already budgeted
+// across all months up to and including month. Off-budget accounts (e.g. a
+// tracked investment) never count toward it, and a month doesn't count
+// budgeted amounts assigned ahead of the one being viewed. Mirrors
+// internal/api.BudgetHandler.Get's to_budget computation, built on top of
+// internal/budget.ToBudget there.
+export function toBudget(
+  accounts: Account[],
+  transactions: Transaction[],
+  budgetEntries: BudgetEntry[],
+  month: string,
+): number {
+  let totalBalance = 0;
+  for (const account of accounts) {
+    if (account.deleted_at !== null || !account.on_budget) continue;
+    totalBalance += computeBalance(
+      transactions.filter((t) => t.account_id === account.id),
+    );
+  }
+
+  let budgetedToDate = 0;
+  for (const entry of budgetEntries) {
+    if (entry.deleted_at !== null) continue;
+    if (entry.month <= month) budgetedToDate += entry.budgeted;
+  }
+
+  return totalBalance - budgetedToDate;
 }

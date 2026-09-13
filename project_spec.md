@@ -396,7 +396,7 @@ A living list — any new machine-readable error code introduced in code must be
 - [x] Transactions: create, edit, delete, mark cleared, transfers between accounts; rejected on closed accounts
 - [x] Categories: groups + categories, single non-deletable income group, reassignment flow required to delete a category/payee that's in use
 - [x] Payees: create, rename, soft-delete with reassignment (§5.4)
-- [ ] Budgeting: assign amounts per category/month, correct rollover, correct overspending rule, "Available to Budget" calculation, zero-amount PUT deletes the row
+- [x] Budgeting: assign amounts per category/month, correct rollover, correct overspending rule, "Available to Budget" calculation, zero-amount PUT deletes the row
 - [x] Monthly budget grid UI (budgeted / activity / available)
 - [x] Account register UI
 - [x] API conventions applied consistently: response/error envelope, HTTP status codes, error code table (§7.1–§7.2)

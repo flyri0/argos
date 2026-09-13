@@ -117,6 +117,7 @@
   "register.confirm": "Confirm",
   "register.closedNotice": "This account is closed and can't accept new transactions.",
 
+  "budget.toBudget": "Available to Budget",
   "budget.prevMonth": "Previous month",
   "budget.nextMonth": "Next month",
   "budget.empty": "No categories yet.",

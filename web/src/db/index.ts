@@ -25,5 +25,11 @@ export {
   type NewTransferInput,
   type TransferEditInput,
 } from "./transfers";
-export { activity, available, rollupCategory, type CategoryMonthFigures } from "./envelope";
+export {
+  activity,
+  available,
+  rollupCategory,
+  toBudget,
+  type CategoryMonthFigures,
+} from "./envelope";
 export { setBudgetedAmount } from "./budget";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { activity, available, rollupCategory } from "./envelope";
-import type { BudgetEntry, Transaction } from "./types";
+import { activity, available, rollupCategory, toBudget } from "./envelope";
+import type { Account, BudgetEntry, Transaction } from "./types";
 
 function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
   return {
@@ -19,6 +19,23 @@ function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
     cleared: false,
     notes: "",
     transfer_id: null,
+    ...overrides,
+  };
+}
+
+function makeAccount(overrides: Partial<Account> = {}): Account {
+  return {
+    id: crypto.randomUUID(),
+    hlc_physical: 0,
+    hlc_counter: 0,
+    hlc_node_id: "node-1",
+    deleted_at: null,
+    name: "Checking",
+    type: "checking",
+    on_budget: true,
+    closed: false,
+    currency: "USD",
+    notes: null,
     ...overrides,
   };
 }
@@ -178,5 +195,45 @@ describe("rollupCategory", () => {
       activity: 0,
       available: 0,
     });
+  });
+});
+
+// Mirrors internal/api/budget_test.go's TestBudgetGet_* cases (same
+// scenario, same expected totals), so the two independent implementations
+// of §5.3's "Available to Budget" stay provably in sync.
+describe("toBudget", () => {
+  it("subtracts everything budgeted to date from on-budget account balances", () => {
+    const onBudget = makeAccount({ id: "acc-1", on_budget: true });
+    const offBudget = makeAccount({ id: "acc-2", on_budget: false });
+    const transactions = [
+      makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
+      makeTransaction({ account_id: "acc-2", date: "2026-01-15", amount: 500000 }),
+    ];
+    const entries = [makeBudgetEntry({ month: "2026-01", budgeted: 20000 })];
+
+    // 100000 (on-budget balance only) - 20000 (budgeted) = 80000
+    expect(toBudget([onBudget, offBudget], transactions, entries, "2026-01")).toBe(80000);
+  });
+
+  it("excludes budget entries assigned to months after the one being viewed", () => {
+    const account = makeAccount({ id: "acc-1" });
+    const transactions = [
+      makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
+    ];
+    const entries = [makeBudgetEntry({ month: "2026-02", budgeted: 30000 })];
+
+    expect(toBudget([account], transactions, entries, "2026-01")).toBe(100000);
+  });
+
+  it("ignores deleted accounts and deleted budget entries", () => {
+    const account = makeAccount({ id: "acc-1", deleted_at: Date.now() });
+    const transactions = [
+      makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
+    ];
+    const entries = [
+      makeBudgetEntry({ month: "2026-01", budgeted: 20000, deleted_at: Date.now() }),
+    ];
+
+    expect(toBudget([account], transactions, entries, "2026-01")).toBe(0);
   });
 });

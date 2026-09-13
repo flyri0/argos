@@ -3,11 +3,13 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { useTranslation } from "react-i18next";
 
 import {
+  accounts,
   budgetEntries,
   categories,
   categoryGroups,
   rollupCategory,
   setBudgetedAmount,
+  toBudget,
   transactions,
   type Category,
   type CategoryGroup,
@@ -45,6 +47,7 @@ export function BudgetScreen() {
   const { t } = useTranslation();
   const [month, setMonth] = useState(currentMonth);
 
+  const allAccounts = useLiveQuery(() => accounts.list());
   const allGroups = useLiveQuery(() => categoryGroups.list());
   const allCategories = useLiveQuery(() => categories.list());
   const allBudgetEntries = useLiveQuery(() => budgetEntries.list());
@@ -72,6 +75,11 @@ export function BudgetScreen() {
     return map;
   }, [allCategories]);
 
+  const toBudgetValue = useMemo(
+    () => toBudget(allAccounts ?? [], allTransactions ?? [], allBudgetEntries ?? [], month),
+    [allAccounts, allTransactions, allBudgetEntries, month],
+  );
+
   const figuresByCategory = useMemo(() => {
     const map = new Map<string, CategoryMonthFigures>();
     for (const category of allCategories ?? []) {
@@ -89,6 +97,7 @@ export function BudgetScreen() {
   }
 
   if (
+    allAccounts === undefined ||
     allGroups === undefined ||
     allCategories === undefined ||
     allBudgetEntries === undefined ||
@@ -101,6 +110,7 @@ export function BudgetScreen() {
     <section>
       <div>
         <h2>{t("nav.budget")}</h2>
+        <span>{`${t("budget.toBudget")}: ${formatCurrency(toBudgetValue)}`}</span>
         <button type="button" onClick={() => setMonth((m) => shiftMonth(m, -1))}>
           {t("budget.prevMonth")}
         </button>

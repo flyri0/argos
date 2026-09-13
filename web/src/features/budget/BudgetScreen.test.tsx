@@ -3,13 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  accounts,
   budgetEntries,
   categories,
   categoryGroups,
   db,
   transactions,
 } from "../../db";
-import type { BudgetEntry, Category, CategoryGroup, Transaction } from "../../db";
+import type { Account, BudgetEntry, Category, CategoryGroup, Transaction } from "../../db";
 import { BudgetScreen } from "./BudgetScreen";
 
 beforeEach(async () => {
@@ -25,6 +26,20 @@ const baseSync = {
 };
 
 const month = new Date().toISOString().slice(0, 7);
+
+function makeAccount(overrides: Partial<Account> = {}): Account {
+  return {
+    id: crypto.randomUUID(),
+    ...baseSync,
+    name: "Checking",
+    type: "checking",
+    on_budget: true,
+    closed: false,
+    currency: "USD",
+    notes: null,
+    ...overrides,
+  };
+}
 
 function makeGroup(overrides: Partial<CategoryGroup> = {}): CategoryGroup {
   return {
@@ -149,6 +164,33 @@ describe("BudgetScreen", () => {
     const nextRow = (await screen.findByText("Rent")).closest("tr")!;
     expect(await within(nextRow).findByText("$60.00")).toBeInTheDocument();
     expect(within(nextRow).getByLabelText("Budgeted for Rent")).toHaveValue("0.00");
+  });
+
+  it("shows Available to Budget, excluding off-budget balances and future budgeted amounts", async () => {
+    const onBudgetAccount = makeAccount({ id: "acc-on", on_budget: true });
+    const offBudgetAccount = makeAccount({ id: "acc-off", on_budget: false });
+    await accounts.create(onBudgetAccount);
+    await accounts.create(offBudgetAccount);
+
+    const group = makeGroup();
+    const category = makeCategory({ group_id: group.id, name: "Rent" });
+    await categoryGroups.create(group);
+    await categories.create(category);
+
+    await transactions.create(
+      makeTransaction({ account_id: "acc-on", category_id: category.id, amount: 100000 }),
+    );
+    await transactions.create(
+      makeTransaction({ account_id: "acc-off", category_id: category.id, amount: 500000 }),
+    );
+    await budgetEntries.create(
+      makeBudgetEntry({ category_id: category.id, month, budgeted: 20000 }),
+    );
+
+    render(<BudgetScreen />);
+
+    // 100000 (on-budget only) - 20000 (budgeted) = 80000
+    expect(await screen.findByText("Available to Budget: $800.00")).toBeInTheDocument();
   });
 
   it("shows a hidden badge for hidden categories", async () => {
