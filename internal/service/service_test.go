@@ -177,8 +177,8 @@ func TestCurrentUsername_ReturnsNonEmpty(t *testing.T) {
 }
 
 func TestInstallUninstall_UnsupportedOSRejectedBeforeAnySideEffect(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("this guards the non-Linux short-circuit; on Linux, Install/Uninstall would shell out for real, so it's exercised via install/uninstall with a fake runner instead")
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		t.Skip("this guards the OS short-circuit for platforms with no real implementation yet; on Linux/Windows, Install/Uninstall would act for real, so those are exercised via install/uninstall and installWindowsService/uninstallWindowsService with fakes instead")
 	}
 	if err := Install(); err != ErrUnsupportedOS {
 		t.Fatalf("expected ErrUnsupportedOS, got %v", err)

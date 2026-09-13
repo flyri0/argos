@@ -1,8 +1,8 @@
 // Package service registers/removes Argos as a system service (§3.2), so
 // it starts with the system without requiring a logged-in user or a
-// tray. This file implements Linux (a systemd user unit) only; macOS
-// (launchd) and Windows (Windows Service) are separate follow-up
-// milestones.
+// tray. Linux (a systemd user unit, this file) and Windows (a Windows
+// Service, service_windows.go) are implemented; macOS (launchd) is a
+// separate follow-up milestone.
 package service
 
 import (
@@ -38,18 +38,40 @@ func realRunner(name string, args ...string) error {
 	return cmd.Run()
 }
 
-// Install writes a systemd user unit that runs the current argos binary
-// as "argos serve --headless", reloads the user systemd daemon, enables
-// and starts the unit, and enables linger for the current user. Linger
-// is what lets a --user unit start at boot rather than only at next
-// login — without it, "enabled to start on boot" wouldn't actually hold
-// for a user unit, contradicting §3.2's "starts with the system ...
-// without requiring a logged-in user."
+// Install registers Argos as a system service enabled to start on boot:
+// a systemd user unit on Linux, a Windows Service on Windows. Any other
+// OS is not yet supported (macOS/launchd is a separate follow-up).
 func Install() error {
-	if runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "linux":
+		return installLinux()
+	case "windows":
+		return installWindowsReal()
+	default:
 		return ErrUnsupportedOS
 	}
+}
 
+// Uninstall removes whatever Install registered.
+func Uninstall() error {
+	switch runtime.GOOS {
+	case "linux":
+		return uninstallLinux()
+	case "windows":
+		return uninstallWindowsReal()
+	default:
+		return ErrUnsupportedOS
+	}
+}
+
+// installLinux writes a systemd user unit that runs the current argos
+// binary as "argos serve --headless", reloads the user systemd daemon,
+// enables and starts the unit, and enables linger for the current user.
+// Linger is what lets a --user unit start at boot rather than only at
+// next login — without it, "enabled to start on boot" wouldn't actually
+// hold for a user unit, contradicting §3.2's "starts with the system ...
+// without requiring a logged-in user."
+func installLinux() error {
 	execPath, err := resolveExecPath()
 	if err != nil {
 		return err
@@ -66,12 +88,8 @@ func Install() error {
 	return install(unitDir, execPath, username, realRunner)
 }
 
-// Uninstall stops and disables the unit and removes its unit file.
-func Uninstall() error {
-	if runtime.GOOS != "linux" {
-		return ErrUnsupportedOS
-	}
-
+// uninstallLinux stops and disables the unit and removes its unit file.
+func uninstallLinux() error {
 	unitDir, err := userUnitDir()
 	if err != nil {
 		return err

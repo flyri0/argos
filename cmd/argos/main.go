@@ -50,7 +50,8 @@ func run(args []string, stdout io.Writer) error {
 }
 
 // runService implements "argos service install" / "argos service
-// uninstall" (§3.2): registering/removing the systemd user unit that runs
+// uninstall" (§3.2): registering/removing the system service (a systemd
+// user unit on Linux, a Windows Service on Windows) that runs
 // "argos serve --headless" and is enabled to start on boot.
 func runService(args []string, stdout io.Writer) error {
 	if len(args) != 1 || (args[0] != "install" && args[0] != "uninstall") {
@@ -174,6 +175,14 @@ func runServe(args []string, stdout io.Writer) error {
 
 	addr := bindAddr(cfg)
 	srv := &http.Server{Addr: addr, Handler: router}
+
+	handledByWindowsSCM, err := maybeRunAsWindowsService(cfg, srv, stdout)
+	if err != nil {
+		return err
+	}
+	if handledByWindowsSCM {
+		return nil
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
