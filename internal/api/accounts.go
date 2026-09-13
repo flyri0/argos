@@ -94,9 +94,13 @@ func accountBalance(ctx context.Context, conn *sql.DB, accountID string) (int64,
 	return budget.AccountBalance(accountID, transactions), nil
 }
 
-type apiError struct {
-	Code    string `json:"error"`
+type apiErrorBody struct {
+	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type apiError struct {
+	Error apiErrorBody `json:"error"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -105,10 +109,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// writeError follows §4: a stable machine-readable code plus a plain
-// English message; the server never returns pre-translated text.
+// writeError follows §7.1: a stable machine-readable code plus a plain
+// English message, nested under "error"; the server never returns
+// pre-translated text (§4).
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, apiError{Code: code, Message: message})
+	writeJSON(w, status, apiError{Error: apiErrorBody{Code: code, Message: message}})
 }
 
 func (h *AccountsHandler) List(w http.ResponseWriter, r *http.Request) {

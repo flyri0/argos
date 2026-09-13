@@ -15,7 +15,7 @@ var ErrCategoryGroupNotFound = errors.New("category group not found")
 var ErrCategoryInUse = errors.New("category in use")
 
 // ErrReassignTargetNotFound is returned when reassignTo doesn't name an
-// existing, non-deleted category.
+// existing, non-deleted row — shared by DeleteCategory and DeletePayee.
 var ErrReassignTargetNotFound = errors.New("reassign target not found")
 
 // CategoryGroup is a category_groups row (§5.2) plus its sync metadata (§5.1).

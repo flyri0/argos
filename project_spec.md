@@ -339,6 +339,9 @@ A living list — any new machine-readable error code introduced in code must be
 | `ACCOUNT_CLOSED` | 409 | attempted to add a transaction to a closed account |
 | `CATEGORY_IN_USE_NEEDS_REASSIGN` | 409 | category delete requested without `reassign_to`, but it's in use (§5.4) |
 | `PAYEE_IN_USE_NEEDS_REASSIGN` | 409 | payee delete requested without `reassign_to`, but it's in use (§5.4) |
+| `PAYEE_NOT_FOUND` | 404 | no payee with the given `:id` |
+| `PAYEE_EXISTS` | 409 | `POST /api/payees` supplied an `id` already in use |
+| `REASSIGN_TARGET_NOT_FOUND` | 404 | `reassign_to` doesn't name an existing, non-deleted category/payee (§5.4) |
 | `PAIRING_REQUIRED` | 403 | request has no valid, non-revoked device token (§6.2) |
 | `PAIRING_RATE_LIMITED` | 429 | too many failed pairing attempts from this source (§6.3) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
