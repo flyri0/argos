@@ -37,12 +37,22 @@ type PairingHandler struct {
 	pending   map[string]pendingCode
 
 	approveLimiter *auth.RateLimiter
+	pollLimiter    *auth.RateLimiter
 }
 
-// pendingCode is one outstanding §6.2 pairing code, waiting to be presented
-// to /api/pairing/approve before it expires.
+// pendingCode is one outstanding §6.2 pairing code. `claimed` and `token`
+// track its life past /api/pairing/approve: the code stays in `pending`
+// (rather than being deleted like a plain rejected code) so the *waiting*
+// device — which never sees /approve's response, since that goes to the
+// *approving* device — can retrieve its token via
+// GET /api/pairing/request/{code} (§6.2, §7.3). `claimed` is set the
+// instant a correct /approve request is matched, atomically with that
+// check, so two concurrent approvals of the same code can't both mint a
+// device; `token` is filled in once minting actually succeeds.
 type pendingCode struct {
 	expiresAt time.Time
+	claimed   bool
+	token     string
 }
 
 // pairingCodeTTL is the exact 10-minute lifetime from §6.2.
@@ -59,6 +69,7 @@ func RegisterPairingRoutes(mux *http.ServeMux, conn *sql.DB) error {
 	mux.HandleFunc("POST /api/pairing/bootstrap", h.Bootstrap)
 	mux.HandleFunc("POST /api/pairing/request", h.Request)
 	mux.HandleFunc("POST /api/pairing/approve", h.Approve)
+	mux.HandleFunc("GET /api/pairing/request/{code}", h.Poll)
 	return nil
 }
 
@@ -68,6 +79,7 @@ func newPairingHandler(conn *sql.DB, out io.Writer) (*PairingHandler, error) {
 		limiter:        auth.NewRateLimiter(),
 		pending:        make(map[string]pendingCode),
 		approveLimiter: auth.NewRateLimiter(),
+		pollLimiter:    auth.NewRateLimiter(),
 	}
 
 	empty, err := db.DevicesEmpty(context.Background(), conn)
@@ -197,6 +209,12 @@ type approveRequest struct {
 // devices with the default name "Unnamed device". The pairing code is a
 // network-guessable secret, so §6.3's lockout applies here exactly as it
 // does to /api/pairing/bootstrap.
+//
+// Unlike the code this replaced, a correctly-matched entry is *not*
+// deleted here — it's marked claimed and, once minting succeeds, given the
+// token — so GET /api/pairing/request/{code} can still hand that token to
+// the waiting device afterwards (§6.2). Only an expired entry is dropped
+// outright, same as before.
 func (h *PairingHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	if !requireDevice(w, r, h.DB) {
 		return
@@ -211,13 +229,28 @@ func (h *PairingHandler) Approve(w http.ResponseWriter, r *http.Request) {
 	ip := sourceIP(r)
 	now := time.Now()
 
+	// Checked before touching `pending` at all: if this source is already
+	// locked out, a correct code here must still be rejected (§6.3), and
+	// critically must NOT be claimed — claiming it here and then rejecting
+	// it below would permanently strand an otherwise-good code.
+	if h.approveLimiter.LockedOut(ip, now) {
+		h.approveLimiter.Attempt(ip, now, false)
+		writeError(w, http.StatusTooManyRequests, "PAIRING_RATE_LIMITED", "too many failed pairing attempts from this source")
+		return
+	}
+
 	h.pendingMu.Lock()
 	pending, found := h.pending[req.Code]
-	correct := req.Code != "" && found && now.Before(pending.expiresAt)
-	if found {
-		// Consume the code on a correct match, and drop it once expired
-		// either way — an expired code is useless and would otherwise sit
-		// in the map forever.
+	expired := found && !now.Before(pending.expiresAt)
+	correct := req.Code != "" && found && !expired && !pending.claimed
+	switch {
+	case correct:
+		// Claimed atomically with the check above, under the same lock
+		// acquisition, so two simultaneous correct approvals of the same
+		// code can't both pass: the second sees claimed == true.
+		pending.claimed = true
+		h.pending[req.Code] = pending
+	case found && expired:
 		delete(h.pending, req.Code)
 	}
 	h.pendingMu.Unlock()
@@ -243,12 +276,73 @@ func (h *PairingHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.pendingMu.Lock()
+	h.pending[req.Code] = pendingCode{expiresAt: pending.expiresAt, claimed: true, token: token}
+	h.pendingMu.Unlock()
+
 	writeJSON(w, http.StatusCreated, bootstrapResponse{
 		ID:         device.ID,
 		Name:       device.Name,
 		Token:      token,
 		ApprovedAt: device.ApprovedAt,
 	})
+}
+
+type pollPairingResponse struct {
+	Status string `json:"status"`
+	Token  string `json:"token,omitempty"`
+}
+
+// Poll implements GET /api/pairing/request/{code} (§6.2, §7.3): the half
+// of the pairing loop that was otherwise missing — /api/pairing/approve's
+// response goes to the *approving* device, never to the device that's
+// actually waiting, so this is how the waiting device learns it's been
+// approved and gets its own token. While the code is still outstanding it
+// returns {"status":"pending"}; once /approve has minted a token for it,
+// returns {"status":"approved","token":"..."} exactly once and clears the
+// entry so it can never be retrieved again. An unknown, already-retrieved,
+// or expired code is a 404, not just a plain rejection, since (unlike
+// /approve) there's no "wrong guess vs. correct" distinction to conflate —
+// this is a lookup, and a stale/missing code no longer names anything.
+//
+// This is unauthenticated by design: it's polled by a device that has no
+// token yet. It carries the same guessable-secret risk as the codes
+// themselves, though, so it gets its own §6.3 lockout rather than none.
+func (h *PairingHandler) Poll(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+	ip := sourceIP(r)
+	now := time.Now()
+
+	if h.pollLimiter.LockedOut(ip, now) {
+		h.pollLimiter.Attempt(ip, now, false)
+		writeError(w, http.StatusTooManyRequests, "PAIRING_RATE_LIMITED", "too many failed pairing attempts from this source")
+		return
+	}
+
+	h.pendingMu.Lock()
+	pending, found := h.pending[code]
+	if found && !now.Before(pending.expiresAt) {
+		delete(h.pending, code)
+		found = false
+	}
+	var resp pollPairingResponse
+	if found {
+		if pending.token != "" {
+			resp = pollPairingResponse{Status: "approved", Token: pending.token}
+			delete(h.pending, code)
+		} else {
+			resp = pollPairingResponse{Status: "pending"}
+		}
+	}
+	h.pendingMu.Unlock()
+
+	h.pollLimiter.Attempt(ip, now, found)
+
+	if !found {
+		writeError(w, http.StatusNotFound, "PAIRING_CODE_NOT_FOUND", "no pending pairing request for this code")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // sourceIP extracts the request's source IP, stripping the port that

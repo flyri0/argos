@@ -307,6 +307,7 @@ The normal flow below (§6.2) assumes an already-trusted device exists to approv
 - **First contact**: a device hitting the API without a valid token gets a `403 PAIRING_REQUIRED`. The frontend shows a "waiting for approval" screen with a pairing code.
 - **The pairing code is short-lived**: 10 minutes from issuance, unlike the bootstrap code in §6.1 — it exists for a live, human-in-the-loop confirmation, not as a durable secret, so a short expiry is both safe and appropriate here.
 - **Approval**: the *already-trusted* device (or the desktop tray app) shows a prompt — "New device requesting access: code `4821`, approve?" — and the user confirms there. Approval mints a long-lived token for the new device and records it in `devices` (§5.2) with a default name of `"Unnamed device"`.
+- **The waiting device learns of approval by polling**: `POST /api/pairing/approve`'s response (including the newly minted token) goes to the *approving* device, not the one that's actually waiting — the waiting device has no way to know when a human elsewhere has confirmed its code. So while its code is outstanding, the waiting device polls `GET /api/pairing/request/:code` (§7.3): the response is `{"status": "pending"}` until approved, then `{"status": "approved", "token": "..."}` exactly once — the server clears the association immediately after that single successful poll, so the token can't be retrieved a second time. An unknown, already-retrieved, or expired code is `404 PAIRING_CODE_NOT_FOUND`. This polling endpoint is unauthenticated (the polling device has no token yet) but still guesses a network-exposed secret, so it carries its own §6.3 lockout.
 - **Every request after pairing** carries that device's token; the server checks it against `devices.token_hash` and rejects revoked or unknown tokens.
 - **Localhost is implicitly trusted**: a request originating from `127.0.0.1` on the same machine running the server does not need pairing — you always have direct access to your own server without a chicken-and-egg approval step.
 - **Managing devices**: the tray app (desktop mode) and a settings page (PWA) both list paired devices with last-seen time, allow renaming a device (`PATCH /api/devices/:id`), and allow revoking any of them (`DELETE /api/devices/:id`), which immediately invalidates that device's token.
@@ -314,7 +315,7 @@ The normal flow below (§6.2) assumes an already-trusted device exists to approv
 
 ### 6.3 Rate limiting on pairing attempts
 
-Both the bootstrap setup code (§6.1) and the per-request pairing code (§6.2) are secrets guessed over the network, so both endpoints (`/api/pairing/bootstrap` and `/api/pairing/approve`) enforce a per-source lockout with concrete numbers, not just "some" rate limiting: after **5 consecutive failed attempts** from the same source IP, that IP is locked out for **1 minute**; each further failed attempt while still within a lockout period doubles the lockout duration (2, 4, 8… minutes), capped at **30 minutes**. The failure count for a source resets after one successful attempt, or after **24 hours** with no failed attempts from it. This is what actually makes the setup code's lack of time-based expiry safe — entropy plus a bounded guessing rate together make brute-forcing impractical, where either alone would not be enough.
+Both the bootstrap setup code (§6.1) and the per-request pairing code (§6.2) are secrets guessed over the network, so all three endpoints that accept or look up one of these codes (`/api/pairing/bootstrap`, `/api/pairing/approve`, and `/api/pairing/request/:code`) enforce a per-source lockout with concrete numbers, not just "some" rate limiting: after **5 consecutive failed attempts** from the same source IP, that IP is locked out for **1 minute**; each further failed attempt while still within a lockout period doubles the lockout duration (2, 4, 8… minutes), capped at **30 minutes**. The failure count for a source resets after one successful attempt, or after **24 hours** with no failed attempts from it. This is what actually makes the setup code's lack of time-based expiry safe — entropy plus a bounded guessing rate together make brute-forcing impractical, where either alone would not be enough. Each of the three endpoints tracks its own source-IP failure counts independently, rather than sharing one counter, the same way `/api/pairing/bootstrap` and `/api/pairing/approve` already did before this endpoint existed.
 
 ## 7. API conventions and endpoints
 
@@ -347,6 +348,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `PAIRING_REQUIRED` | 403 | request has no valid, non-revoked device token (§6.2) |
 | `PAIRING_RATE_LIMITED` | 429 | too many failed pairing attempts from this source (§6.3) |
 | `BOOTSTRAP_CLOSED` | 410 | `POST /api/pairing/bootstrap` called after the first device has already paired (§6.1) |
+| `PAIRING_CODE_NOT_FOUND` | 404 | `GET /api/pairing/request/:code` named a code that's unknown, already retrieved, or past its 10-minute expiry (§6.2) |
 | `DEVICE_NOT_FOUND` | 404 | no device with the given `:id` (§6.2) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
 | `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid or references a row that doesn't exist |
@@ -372,6 +374,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `PUT` | `/api/budget/:month/:category_id` | Set budgeted amount (deletes the row if set to 0, see §5.2) |
 | `POST` | `/api/pairing/bootstrap` | First device claims the printed setup code (§6.1); `410 Gone` once `devices` is non-empty |
 | `POST` | `/api/pairing/request` | Unpaired device requests access, receives a pairing code |
+| `GET` | `/api/pairing/request/:code` | Waiting device polls its code for approval status; returns the token exactly once approved (§6.2) |
 | `POST` | `/api/pairing/approve` | Trusted device approves a pending pairing code, mints a token |
 | `GET` | `/api/devices` | List paired devices |
 | `PATCH` | `/api/devices/:id` | Rename a paired device |

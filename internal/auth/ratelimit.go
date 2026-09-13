@@ -83,3 +83,25 @@ func (rl *RateLimiter) Attempt(ip string, now time.Time, correct bool) bool {
 	rl.ips[ip] = st
 	return false
 }
+
+// LockedOut reports whether ip is currently within a lockout window,
+// without recording a new attempt. Attempt's own return value conflates
+// "this attempt was wrong" with "this source is locked out" into a single
+// false — the right call for an endpoint (bootstrap, approve) that reports
+// both the same way, via PAIRING_RATE_LIMITED. A caller that must tell the
+// two apart — e.g. one that owes a distinct "not found" response for a
+// simply-wrong lookup, and only PAIRING_RATE_LIMITED once genuinely locked
+// out — checks this first.
+func (rl *RateLimiter) LockedOut(ip string, now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	st := rl.ips[ip]
+	if st == nil {
+		return false
+	}
+	if now.Sub(st.lastFailure) >= rateLimitResetAfter {
+		return false
+	}
+	return now.Before(st.lockoutUntil)
+}

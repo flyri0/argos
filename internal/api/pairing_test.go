@@ -304,6 +304,131 @@ func TestPairingApprove_ExpiredCodeRejected(t *testing.T) {
 	}
 }
 
+func TestPairingApprove_LockedOutSourceDoesNotClaimTheCode(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	// Lock this source out on an unrelated wrong code first.
+	for i := 0; i < 5; i++ {
+		postApprove(t, h, "9999")
+	}
+
+	// The genuinely correct code, presented while still locked out, must
+	// still be rejected...
+	if w := postApprove(t, h, reqResp.Code); w.Code == http.StatusCreated {
+		t.Fatalf("expected approval to be rejected while locked out")
+	}
+
+	// ...but critically must not be stranded: claiming it here and then
+	// rejecting it anyway would make it permanently unusable, since a
+	// second correct presentation later would see claimed == true.
+	h.pendingMu.Lock()
+	p, found := h.pending[reqResp.Code]
+	h.pendingMu.Unlock()
+	if !found || p.claimed {
+		t.Fatalf("expected the code to remain unclaimed after a locked-out attempt, got found=%v claimed=%v", found, p.claimed)
+	}
+}
+
+func getPoll(t *testing.T, h *PairingHandler, code string) (*httptest.ResponseRecorder, pollPairingResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/pairing/request/"+code, nil)
+	req.SetPathValue("code", code)
+	w := httptest.NewRecorder()
+	h.Poll(w, req)
+
+	var resp pollPairingResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	return w, resp
+}
+
+func TestPairingPoll_PendingBeforeApproval(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	w, resp := getPoll(t, h, reqResp.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp.Status != "pending" || resp.Token != "" {
+		t.Fatalf("expected a pending status with no token, got %+v", resp)
+	}
+}
+
+func TestPairingPoll_ReturnsTokenExactlyOnceAfterApproval(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+	postApprove(t, h, reqResp.Code)
+
+	w, resp := getPoll(t, h, reqResp.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp.Status != "approved" || resp.Token == "" {
+		t.Fatalf("expected an approved status with a token, got %+v", resp)
+	}
+
+	// A second poll must not return the token again — it's already been
+	// handed off once, and the association is cleared immediately after.
+	w2, _ := getPoll(t, h, reqResp.Code)
+	if w2.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on a second poll, got %d: %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestPairingPoll_UnknownCodeReturns404(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+
+	w, _ := getPoll(t, h, "0000")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp apiError
+	json.Unmarshal(w.Body.Bytes(), &errResp)
+	if errResp.Error.Code != "PAIRING_CODE_NOT_FOUND" {
+		t.Fatalf("expected PAIRING_CODE_NOT_FOUND, got %+v", errResp)
+	}
+}
+
+func TestPairingPoll_ExpiredCodeReturns404(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+	_, reqResp := postRequestPairing(t, h)
+
+	// Force the code to look expired, rather than sleeping 10 real minutes.
+	h.pendingMu.Lock()
+	h.pending[reqResp.Code] = pendingCode{expiresAt: time.Now().Add(-time.Second)}
+	h.pendingMu.Unlock()
+
+	w, _ := getPoll(t, h, reqResp.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPairingPoll_LockoutAfterFiveFailedAttempts(t *testing.T) {
+	h, _ := newTestPairingHandler(t)
+
+	for i := 0; i < 5; i++ {
+		w, _ := getPoll(t, h, "0000")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("attempt %d: expected 404, got %d", i+1, w.Code)
+		}
+	}
+
+	// Even a genuinely pending code must now be rejected as rate-limited —
+	// this source is locked out regardless of what it asks for next.
+	_, reqResp := postRequestPairing(t, h)
+	w, _ := getPoll(t, h, reqResp.Code)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 during lockout, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp apiError
+	json.Unmarshal(w.Body.Bytes(), &errResp)
+	if errResp.Error.Code != "PAIRING_RATE_LIMITED" {
+		t.Fatalf("expected PAIRING_RATE_LIMITED, got %+v", errResp)
+	}
+}
+
 func TestPairingApprove_RequiresAuthFromNonLocalhost(t *testing.T) {
 	h, _ := newTestPairingHandler(t)
 	_, reqResp := postRequestPairing(t, h)

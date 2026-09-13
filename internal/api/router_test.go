@@ -88,4 +88,15 @@ func TestNewRouter_PairingRoutesRemainUnauthenticated(t *testing.T) {
 	if w.Code == http.StatusForbidden {
 		t.Fatalf("expected pairing routes to stay reachable without a device token, got 403: %s", w.Body.String())
 	}
+
+	// GET /api/pairing/request/:code (§6.2) is polled by a device that has
+	// no token yet, so it must stay unauthenticated too.
+	pollReq := httptest.NewRequest(http.MethodGet, "/api/pairing/request/0000", nil)
+	pollReq.RemoteAddr = "203.0.113.5:1234"
+	pollW := httptest.NewRecorder()
+	router.ServeHTTP(pollW, pollReq)
+
+	if pollW.Code == http.StatusForbidden {
+		t.Fatalf("expected the pairing poll route to stay reachable without a device token, got 403: %s", pollW.Body.String())
+	}
 }

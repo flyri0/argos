@@ -133,6 +133,46 @@ func TestRateLimiter_ResetsAfter24HoursOfInactivity(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_LockedOutReflectsAttemptStateWithoutRecordingOne(t *testing.T) {
+	rl := NewRateLimiter()
+	now := time.Now()
+
+	if rl.LockedOut("1.2.3.4", now) {
+		t.Fatalf("expected a fresh source to not be locked out")
+	}
+
+	for i := 0; i < rateLimitThreshold; i++ {
+		rl.Attempt("1.2.3.4", now, false)
+	}
+	if !rl.LockedOut("1.2.3.4", now) {
+		t.Fatalf("expected source to be locked out after the threshold")
+	}
+
+	// Peeking repeatedly must not itself count as an attempt: with no
+	// intervening Attempt call, the lockout still expires exactly on
+	// schedule.
+	rl.LockedOut("1.2.3.4", now)
+	rl.LockedOut("1.2.3.4", now)
+	if rl.LockedOut("1.2.3.4", now.Add(61*time.Second)) {
+		t.Fatalf("expected lockout to have expired naturally at 61s despite repeated peeks")
+	}
+}
+
+func TestRateLimiter_LockedOutResetsAfter24Hours(t *testing.T) {
+	rl := NewRateLimiter()
+	now := time.Now()
+
+	for i := 0; i < rateLimitThreshold; i++ {
+		rl.Attempt("1.2.3.4", now, false)
+	}
+	if !rl.LockedOut("1.2.3.4", now) {
+		t.Fatalf("expected source to be locked out")
+	}
+	if rl.LockedOut("1.2.3.4", now.Add(24*time.Hour)) {
+		t.Fatalf("expected lockout state to reset after 24 hours of inactivity")
+	}
+}
+
 func TestRateLimiter_TracksSourcesIndependently(t *testing.T) {
 	rl := NewRateLimiter()
 	now := time.Now()
