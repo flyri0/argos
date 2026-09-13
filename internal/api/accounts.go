@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"argos/internal/budget"
 	"argos/internal/db"
 )
 
@@ -30,18 +32,19 @@ type AccountsHandler struct {
 	DB *sql.DB
 }
 
-// RegisterAccountRoutes registers GET/POST /api/accounts and PATCH /api/accounts/{id}.
+// RegisterAccountRoutes registers GET/POST /api/accounts, GET /api/accounts/{id},
+// and PATCH /api/accounts/{id}.
 func RegisterAccountRoutes(mux *http.ServeMux, conn *sql.DB) {
 	h := &AccountsHandler{DB: conn}
 	mux.HandleFunc("GET /api/accounts", h.List)
 	mux.HandleFunc("POST /api/accounts", h.Create)
+	mux.HandleFunc("GET /api/accounts/{id}", h.Get)
 	mux.HandleFunc("PATCH /api/accounts/{id}", h.Update)
 }
 
 // account is the public JSON shape: the accounts table's own columns (§5.2)
-// plus id, but never hlc_physical/hlc_counter/hlc_node_id/server_version/
-// deleted_at (§5.1's sync metadata) and never a balance field, since
-// balance is always computed from transactions, never stored (§5.2/§5.3).
+// plus id, plus a "balance" that is computed fresh on every response — it
+// is never a stored column (§5.2/§5.3) and, per this prompt, never cached.
 type account struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
@@ -50,9 +53,10 @@ type account struct {
 	Closed   bool    `json:"closed"`
 	Currency string  `json:"currency"`
 	Notes    *string `json:"notes"`
+	Balance  int64   `json:"balance"`
 }
 
-func toAccount(a db.Account) account {
+func toAccount(a db.Account, balance int64) account {
 	out := account{
 		ID:       a.ID,
 		Name:     a.Name,
@@ -60,11 +64,34 @@ func toAccount(a db.Account) account {
 		OnBudget: a.OnBudget,
 		Closed:   a.Closed,
 		Currency: a.Currency,
+		Balance:  balance,
 	}
 	if a.Notes.Valid {
 		out.Notes = &a.Notes.String
 	}
 	return out
+}
+
+// accountBalance loads accountID's transactions and hands them to
+// internal/budget's pure AccountBalance (§5.3) — the only place the sum
+// is actually computed.
+func accountBalance(ctx context.Context, conn *sql.DB, accountID string) (int64, error) {
+	rows, err := db.ListTransactionAmountsForAccount(ctx, conn, accountID)
+	if err != nil {
+		return 0, err
+	}
+
+	transactions := make([]budget.Transaction, 0, len(rows))
+	for _, r := range rows {
+		t := budget.Transaction{AccountID: r.AccountID, Amount: r.Amount}
+		if r.DeletedAt.Valid {
+			deletedAt := r.DeletedAt.Int64
+			t.DeletedAt = &deletedAt
+		}
+		transactions = append(transactions, t)
+	}
+
+	return budget.AccountBalance(accountID, transactions), nil
 }
 
 type apiError struct {
@@ -93,9 +120,35 @@ func (h *AccountsHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]account, 0, len(accounts))
 	for _, a := range accounts {
-		out = append(out, toAccount(a))
+		balance, err := accountBalance(r.Context(), h.DB, a.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		out = append(out, toAccount(a, balance))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *AccountsHandler) Get(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	a, err := db.GetAccount(r.Context(), h.DB, id)
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		writeError(w, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "no account with this id")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+
+	balance, err := accountBalance(r.Context(), h.DB, a.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toAccount(a, balance))
 }
 
 type createAccountRequest struct {
@@ -166,11 +219,18 @@ func (h *AccountsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, db.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, "ACCOUNT_EXISTS", "an account with this id already exists")
+		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
-	default:
-		writeJSON(w, http.StatusCreated, toAccount(created))
+		return
 	}
+
+	balance, err := accountBalance(r.Context(), h.DB, created.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAccount(created, balance))
 }
 
 // accountPatch holds a partial update decoded field-by-field so that a key
@@ -298,9 +358,16 @@ func (h *AccountsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "no account with this id")
+		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
-	default:
-		writeJSON(w, http.StatusOK, toAccount(updated))
+		return
 	}
+
+	balance, err := accountBalance(r.Context(), h.DB, updated.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toAccount(updated, balance))
 }
