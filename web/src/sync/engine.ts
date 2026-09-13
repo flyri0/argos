@@ -181,20 +181,25 @@ export async function runSync(): Promise<void> {
     // retry immediately rather than merging or waiting for a UI action.
     const storedSyncId = getSyncId();
     if (storedSyncId !== null && storedSyncId !== body.sync_id) {
+      // Deliberately not a `return` here: a `return` inside this `try`
+      // would still run `finally` below, but the function would then exit
+      // immediately afterward — never reaching `if (needsResync)` past the
+      // end of the try/finally. Falling through to the end of the try
+      // block instead is what lets that retry actually fire.
       setSyncId(body.sync_id);
       setCursor(0);
       needsResync = true;
-      return;
-    }
-    if (storedSyncId === null) {
-      setSyncId(body.sync_id);
-    }
+    } else {
+      if (storedSyncId === null) {
+        setSyncId(body.sync_id);
+      }
 
-    for (const change of body.changes) {
-      await applyChange(change);
+      for (const change of body.changes) {
+        await applyChange(change);
+      }
+      await markOutboxResults(units, body.results);
+      setCursor(body.server_version);
     }
-    await markOutboxResults(units, body.results);
-    setCursor(body.server_version);
   } finally {
     syncing = false;
   }

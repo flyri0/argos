@@ -25,7 +25,15 @@ describe("AccountsScreen", () => {
     await user.selectOptions(screen.getByLabelText("Type"), "savings");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    const row = (await screen.findByText("Checking")).closest("tr");
+    // Scoped to the accounts table (which only renders once an account
+    // exists) rather than a bare screen.findByText("Checking") — the Type
+    // select in the still-open form already renders an
+    // <option>Checking</option> (the "checking" account type) the moment
+    // the form opens, so an unscoped text query can resolve against that
+    // instead of the real row, since this account happens to be named the
+    // same as that type's label.
+    const table = await screen.findByRole("table");
+    const row = within(table).getByText("Checking").closest("tr");
     expect(row).not.toBeNull();
     expect(within(row!).getByText("Savings")).toBeInTheDocument();
     expect(within(row!).getByText("$0.00")).toBeInTheDocument();

@@ -76,7 +76,13 @@ describe("AccountRegisterScreen", () => {
     await user.type(screen.getByLabelText("Amount"), "12.34");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    const row = (await screen.findByText("Groceries")).closest("tr");
+    // Scoped to the transaction table (which only renders once the first
+    // transaction exists) rather than a bare screen.findByText("Groceries")
+    // — the category select in the still-open form already renders an
+    // <option>Groceries</option> the moment the modal opens, so an
+    // unscoped text query can resolve against that instead of the real row.
+    const table = await screen.findByRole("table");
+    const row = within(table).getByText("Groceries").closest("tr");
     expect(row).not.toBeNull();
     expect(within(row!).getByText("Corner Store")).toBeInTheDocument();
     expect(within(row!).getByText(/12\.34/)).toBeInTheDocument();
