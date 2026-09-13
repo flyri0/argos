@@ -10,7 +10,7 @@ export {
   outbox,
 } from "./helpers";
 export { computeBalance } from "./balance";
-export { nextHlc, type HlcStamp } from "./hlc";
+export { nextHlc, observeHlc, compareHlc, type HlcStamp } from "./hlc";
 export {
   isCategoryInUse,
   isPayeeInUse,

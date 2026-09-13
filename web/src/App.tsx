@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AccountsScreen } from "./features/accounts/AccountsScreen";
 import { BudgetScreen } from "./features/budget/BudgetScreen";
 import { CategoriesScreen } from "./features/categories/CategoriesScreen";
 import { PayeesScreen } from "./features/payees/PayeesScreen";
+import { startSyncWorker } from "./sync";
+import { SyncNotice } from "./sync/SyncNotice";
 
 type Tab = "accounts" | "budget" | "categories" | "payees";
 
@@ -19,10 +21,13 @@ function App() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("accounts");
 
+  useEffect(() => startSyncWorker(), []);
+
   return (
     <div>
       <header>
         <h1>{t("app.title")}</h1>
+        <SyncNotice />
         <nav>
           {TABS.map(({ id, labelKey }) => (
             <button

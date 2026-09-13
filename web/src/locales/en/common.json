@@ -125,5 +125,7 @@
   "budget.budgetedFor": "Budgeted for {{category}}",
   "budget.activity": "Activity",
   "budget.available": "Available",
-  "budget.hiddenBadge": "Hidden"
+  "budget.hiddenBadge": "Hidden",
+
+  "sync.schemaMismatch": "This app is out of date and can't sync until it's updated. You can keep using it offline in the meantime — nothing you do here will be lost."
 }
