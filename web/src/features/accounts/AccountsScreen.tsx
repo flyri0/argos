@@ -45,20 +45,48 @@ export function AccountsScreen() {
   }, [openAccounts, allTransactions]);
 
   async function handleCreate(values: AccountFormValues) {
+    const { startingBalance, ...accountFields } = values;
+    const accountId = crypto.randomUUID();
     await accounts.create({
-      id: crypto.randomUUID(),
-      ...values,
+      id: accountId,
+      ...accountFields,
       closed: false,
       currency: "USD",
       notes: null,
       deleted_at: null,
       ...nextHlc(),
     });
+    // §5.2 "Starting balance on account creation": pure client-side
+    // convenience, a regular transaction rather than a stored balance.
+    if (startingBalance !== 0) {
+      await transactions.create({
+        id: crypto.randomUUID(),
+        account_id: accountId,
+        category_id: null,
+        payee_id: null,
+        parent_id: null,
+        date: new Date().toISOString().slice(0, 10),
+        amount: startingBalance,
+        cleared: true,
+        notes: t("accounts.startingBalanceNote"),
+        transfer_id: null,
+        deleted_at: null,
+        ...nextHlc(),
+      });
+    }
     setView({ mode: "list" });
   }
 
   async function handleUpdate(id: string, values: AccountFormValues) {
-    await accounts.update(id, { ...values, ...nextHlc() });
+    // startingBalance is create-only sugar (§5.2), not an account column —
+    // picked explicitly rather than spreading `values` so it can never leak
+    // into the stored row.
+    await accounts.update(id, {
+      name: values.name,
+      type: values.type,
+      on_budget: values.on_budget,
+      ...nextHlc(),
+    });
     setView({ mode: "list" });
   }
 

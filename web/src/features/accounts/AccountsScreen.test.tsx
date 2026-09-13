@@ -39,6 +39,43 @@ describe("AccountsScreen", () => {
     expect(within(row!).getByText("$0.00")).toBeInTheDocument();
   });
 
+  it("records a starting balance as a transaction when creating an account", async () => {
+    const user = userEvent.setup();
+    render(<AccountsScreen />);
+
+    await user.click(await screen.findByRole("button", { name: "Add account" }));
+    await user.type(screen.getByLabelText("Name"), "Household");
+    await user.type(screen.getByLabelText("Starting balance"), "500");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const table = await screen.findByRole("table");
+    const row = within(table).getByText("Household").closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText("$500.00")).toBeInTheDocument();
+
+    const stored = await db.transactions.toArray();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      amount: 50000,
+      category_id: null,
+      payee_id: null,
+      cleared: true,
+      notes: "Starting Balance",
+    });
+  });
+
+  it("does not offer a starting balance field when editing an existing account", async () => {
+    const user = userEvent.setup();
+    render(<AccountsScreen />);
+
+    await user.click(await screen.findByRole("button", { name: "Add account" }));
+    await user.type(screen.getByLabelText("Name"), "Household");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    expect(screen.queryByLabelText("Starting balance")).not.toBeInTheDocument();
+  });
+
   it("rejects an empty name instead of creating a row", async () => {
     const user = userEvent.setup();
     render(<AccountsScreen />);

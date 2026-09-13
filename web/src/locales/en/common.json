@@ -19,6 +19,8 @@
   "accounts.nameRequired": "Name is required.",
   "accounts.type": "Type",
   "accounts.onBudget": "On budget",
+  "accounts.startingBalance": "Starting balance",
+  "accounts.startingBalanceNote": "Starting Balance",
   "accounts.balance": "Balance",
   "accounts.save": "Save",
   "accounts.cancel": "Cancel",
