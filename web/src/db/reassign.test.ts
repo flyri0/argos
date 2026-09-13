@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { budgetEntries, categories, payees, transactions } from "./helpers";
+import { budgetEntries, categories, outbox, payees, transactions } from "./helpers";
 import { db } from "./db";
 import { isCategoryInUse, isPayeeInUse, reassignCategory, reassignPayee } from "./reassign";
 import type { BudgetEntry, Category, Payee, Transaction } from "./types";
@@ -126,6 +126,26 @@ describe("reassignCategory", () => {
     expect((await categories.get(source.id))?.deleted_at).not.toBeNull();
   });
 
+  it("enqueues every touched row under one outbox group (§2.3/§2.4: delete + reassign_to move)", async () => {
+    const source = makeCategory({ name: "Old" });
+    const target = makeCategory({ name: "New" });
+    await categories.create(source);
+    await categories.create(target);
+    const live = makeTransaction({ category_id: source.id });
+    await transactions.create(live);
+
+    await reassignCategory(source.id, target.id);
+
+    const entries = await outbox.listUnsynced();
+    // filters out the setup enqueues from categories.create/transactions.create above
+    const groupEntries = entries.filter((e) => e.group_id !== null);
+    expect(groupEntries.length).toBeGreaterThan(0);
+    const groupId = groupEntries[0].group_id;
+    expect(groupEntries.every((e) => e.group_id === groupId)).toBe(true);
+    const categoryDelete = groupEntries.find((e) => e.table === "categories");
+    expect(categoryDelete?.op).toBe("delete");
+  });
+
   it("sums budgeted amounts when the target already has a row for that month", async () => {
     const source = makeCategory({ name: "Old" });
     const target = makeCategory({ name: "New" });
@@ -218,5 +238,22 @@ describe("reassignPayee", () => {
     expect((await transactions.get(live.id))?.payee_id).toBe(target.id);
     expect((await transactions.get(deleted.id))?.payee_id).toBe(source.id);
     expect((await payees.get(source.id))?.deleted_at).not.toBeNull();
+  });
+
+  it("enqueues the reassigned transaction and the payee delete under one outbox group", async () => {
+    const source = makePayee({ name: "Old Landlord" });
+    const target = makePayee({ name: "New Landlord" });
+    await payees.create(source);
+    await payees.create(target);
+    const live = makeTransaction({ payee_id: source.id });
+    await transactions.create(live);
+
+    await reassignPayee(source.id, target.id);
+
+    const entries = await outbox.listUnsynced();
+    const groupEntries = entries.filter((e) => e.group_id !== null);
+    expect(groupEntries).toHaveLength(2);
+    const groupId = groupEntries[0].group_id;
+    expect(groupEntries.every((e) => e.group_id === groupId)).toBe(true);
   });
 });

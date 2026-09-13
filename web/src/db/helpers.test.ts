@@ -211,3 +211,46 @@ describe("outbox (§2.4 mutation shape + local sync bookkeeping)", () => {
     expect(grouped).toHaveLength(2);
   });
 });
+
+// §2.2: "every user action ... is also appended to a local outbox table."
+// These cover the wiring itself — that create/update on the shared
+// tableHelpers factory actually enqueues, not just the outbox primitives.
+describe("tableHelpers enqueue a matching outbox entry on every write (§2.2)", () => {
+  it("create enqueues an upsert carrying the row's full state", async () => {
+    const account = makeAccount();
+
+    await accounts.create(account);
+
+    const [entry] = await outbox.listUnsynced();
+    expect(entry.table).toBe("accounts");
+    expect(entry.op).toBe("upsert");
+    expect(entry.group_id).toBeNull();
+    expect(entry.row).toEqual(account);
+  });
+
+  it("a plain field update enqueues an upsert with the updated row", async () => {
+    const account = makeAccount({ closed: false });
+    await accounts.create(account);
+
+    await accounts.update(account.id, { closed: true });
+
+    const unsynced = await outbox.listUnsynced();
+    const updateEntry = unsynced[unsynced.length - 1];
+    expect(updateEntry.op).toBe("upsert");
+    expect((updateEntry.row as Account).closed).toBe(true);
+  });
+
+  it("an update that sets deleted_at enqueues a \"delete\" op with the minimal delete shape (§2.4)", async () => {
+    const account = makeAccount();
+    await accounts.create(account);
+
+    await accounts.update(account.id, { deleted_at: Date.now() });
+
+    const unsynced = await outbox.listUnsynced();
+    const deleteEntry = unsynced[unsynced.length - 1];
+    expect(deleteEntry.op).toBe("delete");
+    expect(deleteEntry.row.id).toBe(account.id);
+    expect(deleteEntry.row.deleted_at).not.toBeNull();
+    expect(deleteEntry.row).not.toHaveProperty("name");
+  });
+});

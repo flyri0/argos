@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { setBudgetedAmount } from "./budget";
 import { db } from "./db";
-import { budgetEntries } from "./helpers";
+import { budgetEntries, outbox } from "./helpers";
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((table) => table.clear()));
@@ -44,6 +44,17 @@ describe("setBudgetedAmount", () => {
     const row = await budgetEntries.get(firstId);
     expect(row?.deleted_at).not.toBeNull();
     expect(row?.budgeted).toBe(5000);
+  });
+
+  it("enqueues a standalone upsert on insert and a \"delete\" op on the zero-out (§2.2/§2.4)", async () => {
+    await setBudgetedAmount("cat-1", "2026-03", 5000);
+    await setBudgetedAmount("cat-1", "2026-03", 0);
+
+    const entries = await outbox.listUnsynced();
+    expect(entries).toHaveLength(2);
+    expect(entries[0].op).toBe("upsert");
+    expect(entries[0].group_id).toBeNull();
+    expect(entries[1].op).toBe("delete");
   });
 
   it("keeps (category_id, month) rows independent of each other", async () => {

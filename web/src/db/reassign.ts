@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
 import type { BudgetEntry, Transaction } from "./types";
 
@@ -47,9 +48,15 @@ export async function reassignCategory(
   sourceId: string,
   targetId: string,
 ): Promise<void> {
+  // Every row this call touches — reassigned transactions, merged/re-pointed
+  // budget_entries, and the source category's own delete — shares one
+  // outbox group_id, so the server applies the whole reassignment as one
+  // atomic unit (§2.3/§2.4: a delete bundled with its reassign_to move).
+  const groupId = crypto.randomUUID();
+
   await db.transaction(
     "rw",
-    [db.transactions, db.budget_entries, db.categories],
+    [db.transactions, db.budget_entries, db.categories, db.outbox],
     async () => {
       const [sourceTransactions, sourceBudgetEntries] = await Promise.all([
         db.transactions.where("category_id").equals(sourceId).toArray(),
@@ -62,6 +69,8 @@ export async function reassignCategory(
           category_id: targetId,
           ...nextHlc(),
         });
+        const updated = await db.transactions.get(transaction.id);
+        if (updated) await enqueueRowMutation("transactions", updated, groupId);
       }
 
       for (const entry of sourceBudgetEntries) {
@@ -77,15 +86,22 @@ export async function reassignCategory(
             budgeted: targetEntry.budgeted + entry.budgeted,
             ...nextHlc(),
           });
+          const updatedTarget = await db.budget_entries.get(targetEntry.id);
+          if (updatedTarget) await enqueueRowMutation("budget_entries", updatedTarget, groupId);
+
           await db.budget_entries.update(entry.id, {
             deleted_at: Date.now(),
             ...nextHlc(),
           });
+          const updatedSource = await db.budget_entries.get(entry.id);
+          if (updatedSource) await enqueueRowMutation("budget_entries", updatedSource, groupId);
         } else {
           await db.budget_entries.update(entry.id, {
             category_id: targetId,
             ...nextHlc(),
           });
+          const updated = await db.budget_entries.get(entry.id);
+          if (updated) await enqueueRowMutation("budget_entries", updated, groupId);
         }
       }
 
@@ -93,6 +109,8 @@ export async function reassignCategory(
         deleted_at: Date.now(),
         ...nextHlc(),
       });
+      const updatedCategory = await db.categories.get(sourceId);
+      if (updatedCategory) await enqueueRowMutation("categories", updatedCategory, groupId);
     },
   );
 }
@@ -103,7 +121,9 @@ export async function reassignPayee(
   sourceId: string,
   targetId: string,
 ): Promise<void> {
-  await db.transaction("rw", [db.transactions, db.payees], async () => {
+  const groupId = crypto.randomUUID();
+
+  await db.transaction("rw", [db.transactions, db.payees, db.outbox], async () => {
     const sourceTransactions = await db.transactions
       .where("payee_id")
       .equals(sourceId)
@@ -115,8 +135,12 @@ export async function reassignPayee(
         payee_id: targetId,
         ...nextHlc(),
       });
+      const updated = await db.transactions.get(transaction.id);
+      if (updated) await enqueueRowMutation("transactions", updated, groupId);
     }
 
     await db.payees.update(sourceId, { deleted_at: Date.now(), ...nextHlc() });
+    const updatedPayee = await db.payees.get(sourceId);
+    if (updatedPayee) await enqueueRowMutation("payees", updatedPayee, groupId);
   });
 }

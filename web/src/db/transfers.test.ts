@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { db } from "./db";
-import { transactions } from "./helpers";
+import { outbox, transactions } from "./helpers";
 import {
   createTransfer,
   deleteTransaction,
@@ -85,6 +85,25 @@ describe("createTransfer", () => {
     const primary = await transactions.get("t1");
     expect(primary?.transfer_id).not.toBe("t1");
     expect(primary?.transfer_id).not.toBe("t2");
+  });
+
+  it("enqueues both legs as one outbox group sharing the transfer_id (§2.4)", async () => {
+    await createTransfer({
+      id: "t1",
+      transferTransactionId: "t2",
+      accountId: "acc-checking",
+      transferAccountId: "acc-savings",
+      payeeId: null,
+      date: "2026-03-05",
+      amountMinor: -1000,
+      notes: "",
+    });
+
+    const primary = await transactions.get("t1");
+    const entries = await outbox.listUnsynced();
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.group_id === primary?.transfer_id)).toBe(true);
+    expect(entries.map((e) => e.row.id).sort()).toEqual(["t1", "t2"]);
   });
 });
 
@@ -186,6 +205,37 @@ describe("deleteTransaction", () => {
 
     expect((await transactions.get("t1"))?.deleted_at).not.toBeNull();
     expect((await transactions.get("t2"))?.deleted_at).not.toBeNull();
+  });
+
+  it("enqueues both legs' deletes under one outbox group, keyed by transfer_id", async () => {
+    await createTransfer({
+      id: "t1",
+      transferTransactionId: "t2",
+      accountId: "acc-checking",
+      transferAccountId: "acc-savings",
+      payeeId: null,
+      date: "2026-03-05",
+      amountMinor: -1000,
+      notes: "",
+    });
+    const transferId = (await transactions.get("t1"))?.transfer_id;
+
+    await deleteTransaction("t2");
+
+    const deletes = (await outbox.listUnsynced()).filter((e) => e.op === "delete");
+    expect(deletes).toHaveLength(2);
+    expect(deletes.every((e) => e.group_id === transferId)).toBe(true);
+  });
+
+  it("enqueues a \"delete\" op with a null group_id for a standalone (non-transfer) delete", async () => {
+    const plain = makeTransaction({ id: "plain-1" });
+    await transactions.create(plain);
+    await deleteTransaction("plain-1");
+
+    const plainEntries = await outbox.listUnsynced();
+    const plainDelete = plainEntries[plainEntries.length - 1];
+    expect(plainDelete.op).toBe("delete");
+    expect(plainDelete.group_id).toBeNull();
   });
 });
 

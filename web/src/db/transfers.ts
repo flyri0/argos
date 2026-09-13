@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
 import type { Transaction } from "./types";
 
@@ -24,8 +25,8 @@ export interface NewTransferInput {
 export async function createTransfer(input: NewTransferInput): Promise<void> {
   const transferId = crypto.randomUUID();
 
-  await db.transaction("rw", db.transactions, async () => {
-    await db.transactions.add({
+  await db.transaction("rw", db.transactions, db.outbox, async () => {
+    const primary: Transaction = {
       id: input.id,
       account_id: input.accountId,
       category_id: null,
@@ -38,8 +39,8 @@ export async function createTransfer(input: NewTransferInput): Promise<void> {
       transfer_id: transferId,
       deleted_at: null,
       ...nextHlc(),
-    });
-    await db.transactions.add({
+    };
+    const mirror: Transaction = {
       id: input.transferTransactionId,
       account_id: input.transferAccountId,
       category_id: null,
@@ -52,7 +53,13 @@ export async function createTransfer(input: NewTransferInput): Promise<void> {
       transfer_id: transferId,
       deleted_at: null,
       ...nextHlc(),
-    });
+    };
+    await db.transactions.add(primary);
+    await db.transactions.add(mirror);
+    // Both legs share `transferId` as the outbox group_id (§2.4) so the
+    // server commits or rejects them atomically, never just one side.
+    await enqueueRowMutation("transactions", primary, transferId);
+    await enqueueRowMutation("transactions", mirror, transferId);
   });
 }
 
@@ -74,9 +81,10 @@ export async function updateTransfer(
   transactionId: string,
   changes: TransferEditInput,
 ): Promise<void> {
-  await db.transaction("rw", db.transactions, async () => {
+  await db.transaction("rw", db.transactions, db.outbox, async () => {
     const transaction = await db.transactions.get(transactionId);
     if (!transaction || transaction.transfer_id === null) return;
+    const groupId = transaction.transfer_id;
 
     await db.transactions.update(transactionId, {
       date: changes.date,
@@ -85,6 +93,8 @@ export async function updateTransfer(
       amount: changes.amountMinor,
       ...nextHlc(),
     });
+    const updated = await db.transactions.get(transactionId);
+    if (updated) await enqueueRowMutation("transactions", updated, groupId);
 
     const sibling = await db.transactions
       .where("transfer_id")
@@ -100,6 +110,8 @@ export async function updateTransfer(
         amount: -changes.amountMinor,
         ...nextHlc(),
       });
+      const updatedSibling = await db.transactions.get(sibling.id);
+      if (updatedSibling) await enqueueRowMutation("transactions", updatedSibling, groupId);
     }
   });
 }
@@ -110,14 +122,20 @@ export async function updateTransfer(
 // Deleting either leg therefore soft-deletes both (§5.1: soft delete,
 // never hard).
 export async function deleteTransaction(transactionId: string): Promise<void> {
-  await db.transaction("rw", db.transactions, async () => {
+  await db.transaction("rw", db.transactions, db.outbox, async () => {
     const transaction = await db.transactions.get(transactionId);
     if (!transaction) return;
+    // null for a standalone transaction (a lone mutation, per §2.4); the
+    // shared transfer_id for a transfer leg, so both sides of the delete
+    // commit atomically together.
+    const groupId = transaction.transfer_id;
 
     await db.transactions.update(transactionId, {
       deleted_at: Date.now(),
       ...nextHlc(),
     });
+    const updated = await db.transactions.get(transactionId);
+    if (updated) await enqueueRowMutation("transactions", updated, groupId);
 
     if (transaction.transfer_id !== null) {
       const sibling = await db.transactions
@@ -131,6 +149,8 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
           deleted_at: Date.now(),
           ...nextHlc(),
         });
+        const updatedSibling = await db.transactions.get(sibling.id);
+        if (updatedSibling) await enqueueRowMutation("transactions", updatedSibling, groupId);
       }
     }
   });

@@ -1,5 +1,7 @@
 import { db } from "./db";
+import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
+import type { BudgetEntry } from "./types";
 
 // §7.3 PUT /api/budget/:month/:category_id, done directly against the
 // local Dexie replica: an existing (category_id, month) row is updated in
@@ -13,7 +15,7 @@ export async function setBudgetedAmount(
   month: string,
   budgeted: number,
 ): Promise<void> {
-  await db.transaction("rw", db.budget_entries, async () => {
+  await db.transaction("rw", db.budget_entries, db.outbox, async () => {
     const rows = await db.budget_entries
       .where("[category_id+month]")
       .equals([categoryId, month])
@@ -22,14 +24,16 @@ export async function setBudgetedAmount(
 
     if (!existing) {
       if (budgeted === 0) return;
-      await db.budget_entries.add({
+      const row: BudgetEntry = {
         id: crypto.randomUUID(),
         category_id: categoryId,
         month,
         budgeted,
         deleted_at: null,
         ...nextHlc(),
-      });
+      };
+      await db.budget_entries.add(row);
+      await enqueueRowMutation("budget_entries", row);
       return;
     }
 
@@ -44,5 +48,7 @@ export async function setBudgetedAmount(
         ...nextHlc(),
       });
     }
+    const updated = await db.budget_entries.get(existing.id);
+    if (updated) await enqueueRowMutation("budget_entries", updated);
   });
 }
