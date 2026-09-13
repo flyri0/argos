@@ -11,3 +11,9 @@ export {
 } from "./helpers";
 export { computeBalance } from "./balance";
 export { nextHlc, type HlcStamp } from "./hlc";
+export {
+  isCategoryInUse,
+  isPayeeInUse,
+  reassignCategory,
+  reassignPayee,
+} from "./reassign";
