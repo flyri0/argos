@@ -116,14 +116,19 @@ Offline-first editing and later feature growth both come down to the same requir
 id             uuid     primary key   -- client-generated (e.g. UUIDv4), never server-assigned.
                                        -- Lets the client create records offline with a permanent id
                                        -- immediately, with no placeholder/remap step once synced.
-hlc_physical   integer                -- Hybrid Logical Clock: physical time component, unix ms.
-hlc_counter    integer                -- HLC: logical counter, increments when physical time hasn't
+hlc_physical   integer  not null      -- Hybrid Logical Clock: physical time component, unix ms.
+hlc_counter    integer  not null      -- HLC: logical counter, increments when physical time hasn't
                                        -- moved forward since the device's last write or last-seen
                                        -- message. Together with hlc_physical and hlc_node_id, this
                                        -- drives last-write-wins conflict resolution (see §2.3) without
                                        -- trusting any single device's wall clock.
-hlc_node_id    uuid                   -- the device (see `devices`, below) that produced this HLC value;
+hlc_node_id    uuid     not null      -- the device (see `devices`, below) that produced this HLC value;
                                        -- final deterministic tiebreak when physical+counter are equal.
+                                       -- No foreign key to `devices` is declared: a row's writer must
+                                       -- always supply all three HLC fields on every write, even for
+                                       -- CRUD endpoints built before device pairing (§6) or /sync (§2.3)
+                                       -- exist. There is no server-side fallback/placeholder value —
+                                       -- the write path is the same before and after pairing lands.
 server_version integer                -- assigned by the server on every write, strictly increasing
                                        -- across the whole database (not per-row). Used as the sync
                                        -- cursor: "give me everything after version N".
@@ -180,7 +185,8 @@ transactions
   amount        integer         -- in minor currency units, negative = outflow
   cleared       boolean
   notes         text
-  transfer_id   uuid            -- links the two sides of an inter-account transfer
+  transfer_id   uuid     null   -- links the two sides of an inter-account transfer; null for
+                                 -- every non-transfer transaction (the common case)
 
 budget_entries
   category_id   uuid references categories
