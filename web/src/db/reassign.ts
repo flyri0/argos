@@ -1,3 +1,4 @@
+import { generateUUID } from "../lib/uuid";
 import { db } from "./db";
 import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
@@ -52,7 +53,7 @@ export async function reassignCategory(
   // budget_entries, and the source category's own delete — shares one
   // outbox group_id, so the server applies the whole reassignment as one
   // atomic unit (§2.3/§2.4: a delete bundled with its reassign_to move).
-  const groupId = crypto.randomUUID();
+  const groupId = generateUUID();
 
   await db.transaction(
     "rw",
@@ -121,7 +122,7 @@ export async function reassignPayee(
   sourceId: string,
   targetId: string,
 ): Promise<void> {
-  const groupId = crypto.randomUUID();
+  const groupId = generateUUID();
 
   await db.transaction("rw", [db.transactions, db.payees, db.outbox], async () => {
     const sourceTransactions = await db.transactions

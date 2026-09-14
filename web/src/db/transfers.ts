@@ -1,3 +1,4 @@
+import { generateUUID } from "../lib/uuid";
 import { db } from "./db";
 import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
@@ -23,7 +24,7 @@ export interface NewTransferInput {
 // without calling it, since this milestone writes straight to the local
 // Dexie replica rather than through the HTTP API.
 export async function createTransfer(input: NewTransferInput): Promise<void> {
-  const transferId = crypto.randomUUID();
+  const transferId = generateUUID();
 
   await db.transaction("rw", db.transactions, db.outbox, async () => {
     const primary: Transaction = {

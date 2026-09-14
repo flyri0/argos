@@ -8,12 +8,14 @@
 // pairing). `observeHlc` is the other half: advancing local past the
 // physical time seen in a message received from another device (via
 // web/src/sync), mirroring Go's `Observe`.
+import { generateUUID } from "../lib/uuid";
+
 const NODE_ID_KEY = "argos.node_id";
 
 function nodeId(): string {
   let id = localStorage.getItem(NODE_ID_KEY);
   if (!id) {
-    id = crypto.randomUUID();
+    id = generateUUID();
     localStorage.setItem(NODE_ID_KEY, id);
   }
   return id;

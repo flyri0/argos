@@ -15,6 +15,7 @@ import {
 } from "../../db";
 import { Modal } from "../../components/Modal";
 import { ReassignPicker } from "../../components/ReassignPicker";
+import { generateUUID } from "../../lib/uuid";
 import { CategoryForm, type CategoryFormValues } from "./CategoryForm";
 import { CategoryGroupForm, type CategoryGroupFormValues } from "./CategoryGroupForm";
 
@@ -69,7 +70,7 @@ export function CategoriesScreen() {
 
   async function handleAddGroup(values: CategoryGroupFormValues) {
     await categoryGroups.create({
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       ...values,
       sort_order: nextSortOrder(openGroups),
       deleted_at: null,
@@ -85,7 +86,7 @@ export function CategoriesScreen() {
 
   async function handleAddCategory(groupId: string, values: CategoryFormValues) {
     await categories.create({
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       name: values.name,
       group_id: values.group_id,
       hidden: false,

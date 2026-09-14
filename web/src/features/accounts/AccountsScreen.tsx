@@ -9,6 +9,7 @@ import {
   transactions,
   type Account,
 } from "../../db";
+import { generateUUID } from "../../lib/uuid";
 import { AccountRegisterScreen } from "../transactions/AccountRegisterScreen";
 import { AccountForm, type AccountFormValues } from "./AccountForm";
 import { AccountList } from "./AccountList";
@@ -46,7 +47,7 @@ export function AccountsScreen() {
 
   async function handleCreate(values: AccountFormValues) {
     const { startingBalance, ...accountFields } = values;
-    const accountId = crypto.randomUUID();
+    const accountId = generateUUID();
     await accounts.create({
       id: accountId,
       ...accountFields,
@@ -60,7 +61,7 @@ export function AccountsScreen() {
     // convenience, a regular transaction rather than a stored balance.
     if (startingBalance !== 0) {
       await transactions.create({
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         account_id: accountId,
         category_id: null,
         payee_id: null,

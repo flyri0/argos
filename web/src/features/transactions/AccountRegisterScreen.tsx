@@ -19,6 +19,7 @@ import {
   type Transaction,
 } from "../../db";
 import { formatCurrency } from "../../lib/currency";
+import { generateUUID } from "../../lib/uuid";
 import { Modal } from "../../components/Modal";
 import { TransactionForm, type TransactionFormValues } from "./TransactionForm";
 import { TransactionList } from "./TransactionList";
@@ -103,8 +104,8 @@ export function AccountRegisterScreen({ account, onBack }: AccountRegisterScreen
   async function handleCreate(values: TransactionFormValues) {
     if (values.transferAccountId) {
       await createTransfer({
-        id: crypto.randomUUID(),
-        transferTransactionId: crypto.randomUUID(),
+        id: generateUUID(),
+        transferTransactionId: generateUUID(),
         accountId: account.id,
         transferAccountId: values.transferAccountId,
         payeeId: values.payee_id,
@@ -114,7 +115,7 @@ export function AccountRegisterScreen({ account, onBack }: AccountRegisterScreen
       });
     } else {
       await transactions.create({
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         account_id: account.id,
         category_id: values.category_id,
         payee_id: values.payee_id,

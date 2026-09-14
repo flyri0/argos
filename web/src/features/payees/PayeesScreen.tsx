@@ -12,6 +12,7 @@ import {
 } from "../../db";
 import { Modal } from "../../components/Modal";
 import { ReassignPicker } from "../../components/ReassignPicker";
+import { generateUUID } from "../../lib/uuid";
 import { PayeeForm, type PayeeFormValues } from "./PayeeForm";
 
 type Dialog =
@@ -31,7 +32,7 @@ export function PayeesScreen() {
 
   async function handleAdd(values: PayeeFormValues) {
     await payees.create({
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       ...values,
       deleted_at: null,
       ...nextHlc(),

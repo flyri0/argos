@@ -1,3 +1,4 @@
+import { generateUUID } from "../lib/uuid";
 import { db } from "./db";
 import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
@@ -25,7 +26,7 @@ export async function setBudgetedAmount(
     if (!existing) {
       if (budgeted === 0) return;
       const row: BudgetEntry = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         category_id: categoryId,
         month,
         budgeted,
