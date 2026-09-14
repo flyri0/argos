@@ -16,10 +16,13 @@ import (
 // pairing endpoints themselves, which exist precisely to let an unpaired
 // device obtain a token in the first place, and so every request is logged
 // (see project_spec.md "Logging") regardless of which route it hit. /sync
-// and /health are top-level paths outside /api/* (§7.3) and are therefore
-// untouched by the auth wrapping, though still logged. frontend is the
+// sits outside /api/* (§7.3) but still pushes/pulls a device's full budget
+// data, so it's protected exactly the same way; /health is the one
+// deliberate exception (§7.3: "no auth required"). frontend is the
 // embedded PWA build (§2.1, internal/webui.Dist()), served for every route
-// this mux doesn't otherwise claim. logger must not be nil.
+// this mux doesn't otherwise claim — unauthenticated too, since an
+// unpaired device needs to load the app shell to even reach the pairing
+// screen. logger must not be nil.
 //
 // The returned *Router satisfies http.Handler (it embeds one), so callers
 // that only need to serve requests can keep treating it as one; desktop
@@ -68,8 +71,15 @@ func wrapDeviceAuth(mux *http.ServeMux, conn *sql.DB) http.Handler {
 }
 
 // requiresDeviceAuth reports whether path is subject to §6.2's device-token
-// check: every /api/* route except /api/pairing/*.
+// check: every /api/* route except /api/pairing/*, plus /sync (§2.3/§2.4)
+// — despite living outside /api/*, it's how a device reads and writes
+// every syncable table, so an unpaired device must be rejected from it
+// exactly like any other API route. /health and the embedded frontend are
+// the only paths that stay open.
 func requiresDeviceAuth(path string) bool {
+	if path == "/sync" {
+		return true
+	}
 	if !strings.HasPrefix(path, "/api/") {
 		return false
 	}
