@@ -108,7 +108,8 @@ describe("runSync", () => {
       await runSync();
 
       const [, init] = vi.mocked(fetch).mock.calls[0];
-      expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+      const headers = init?.headers as Record<string, string> | undefined;
+      expect(headers?.Authorization).toBeUndefined();
     });
   });
 

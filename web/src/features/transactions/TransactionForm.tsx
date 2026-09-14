@@ -35,6 +35,16 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// `<input type="date">` always yields empty or exactly YYYY-MM-DD per the
+// HTML spec, but not every mobile browser/WebView actually implements the
+// native date picker — some fall back to a plain text field with no
+// format enforcement at all. Validating here catches whatever a
+// non-conforming input let through before it ever reaches the outbox:
+// internal/api/sync.go rejects a malformed date too, but by then it's a
+// silently stuck sync entry (retried forever, §2.3) rather than immediate
+// feedback in the form.
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 export function TransactionForm({
   initial,
   isTransfer,
@@ -70,6 +80,10 @@ export function TransactionForm({
     event.preventDefault();
     if (!date) {
       setError(t("register.dateRequired"));
+      return;
+    }
+    if (!DATE_PATTERN.test(date)) {
+      setError(t("register.dateInvalid"));
       return;
     }
     const parsed = Number.parseFloat(amountText);

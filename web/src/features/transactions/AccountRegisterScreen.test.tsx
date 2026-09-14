@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -101,6 +101,36 @@ describe("AccountRegisterScreen", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Enter an amount greater than zero.",
     );
+  });
+
+  it("rejects a malformed date instead of enqueueing an outbox entry that can never sync", async () => {
+    // Not every mobile browser/WebView implements <input type="date">'s
+    // native picker — some fall back to a plain text field with no format
+    // enforcement, which is how a transaction with a non-YYYY-MM-DD date
+    // reached the outbox for real (internal/api/sync.go rejects it
+    // forever, since a rejected_invalid mutation is retried on every sync
+    // cycle rather than dropped). Simulated here via fireEvent, since
+    // userEvent.type on a real type="date" input won't accept free text.
+    const account = makeAccount();
+    await accounts.create(account);
+
+    const user = userEvent.setup();
+    render(<AccountRegisterScreen account={account} onBack={() => {}} />);
+
+    await user.click(await screen.findByRole("button", { name: "Add transaction" }));
+    // A conforming type="date" input (jsdom included) refuses to hold a
+    // malformed value at all — it resets to "" instead, which is exactly
+    // what a fully spec-compliant browser would do. Flipping the DOM
+    // node's own type to "text" first is what actually reproduces a
+    // non-conforming browser/WebView's fallback behavior.
+    const dateInput = screen.getByLabelText("Date") as HTMLInputElement;
+    dateInput.type = "text";
+    fireEvent.change(dateInput, { target: { value: "13/09/2026" } });
+    await user.type(screen.getByLabelText("Amount"), "10");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Enter a valid date.");
+    expect(await db.transactions.count()).toBe(0);
   });
 
   it("edits an existing transaction", async () => {

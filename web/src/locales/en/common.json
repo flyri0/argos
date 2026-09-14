@@ -107,6 +107,7 @@
   "register.transferToStatic": "Transfer to {{account}}",
   "register.transferLabel": "Transfer: {{account}}",
   "register.dateRequired": "Date is required.",
+  "register.dateInvalid": "Enter a valid date.",
   "register.amountRequired": "Enter an amount greater than zero.",
   "register.transferAccountRequired": "Choose an account to transfer to.",
   "register.save": "Save",
