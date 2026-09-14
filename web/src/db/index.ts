@@ -28,6 +28,8 @@ export {
 export {
   activity,
   available,
+  balanceThrough,
+  onBudgetAccountIds,
   rollupCategory,
   toBudget,
   type CategoryMonthFigures,

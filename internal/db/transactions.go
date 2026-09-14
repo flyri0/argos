@@ -102,6 +102,7 @@ type TransactionUpdate struct {
 // internal/budget, not here.
 type TransactionAmount struct {
 	AccountID string
+	Date      string
 	Amount    int64
 	DeletedAt sql.NullInt64
 }
@@ -110,7 +111,7 @@ type TransactionAmount struct {
 // accountID, deleted or not — callers hand these to internal/budget to
 // compute the actual balance.
 func ListTransactionAmountsForAccount(ctx context.Context, conn *sql.DB, accountID string) ([]TransactionAmount, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT account_id, amount, deleted_at FROM transactions WHERE account_id = ?`, accountID)
+	rows, err := conn.QueryContext(ctx, `SELECT account_id, date, amount, deleted_at FROM transactions WHERE account_id = ?`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +120,7 @@ func ListTransactionAmountsForAccount(ctx context.Context, conn *sql.DB, account
 	out := make([]TransactionAmount, 0)
 	for rows.Next() {
 		var t TransactionAmount
-		if err := rows.Scan(&t.AccountID, &t.Amount, &t.DeletedAt); err != nil {
+		if err := rows.Scan(&t.AccountID, &t.Date, &t.Amount, &t.DeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

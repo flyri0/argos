@@ -73,6 +73,28 @@ func ListTransactionsForCategory(ctx context.Context, conn *sql.DB, categoryID s
 	return out, rows.Err()
 }
 
+// ErrIncomeCategoryNotBudgetable is returned when a budget entry targets a
+// category in the income group. Income reaches to_budget through account
+// balances (§5.3), so an income budget entry would be counted nowhere.
+var ErrIncomeCategoryNotBudgetable = errors.New("income-group categories cannot be budgeted")
+
+func rejectIncomeCategoryTx(ctx context.Context, tx *sql.Tx, categoryID string) error {
+	var isIncome int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT g.is_income FROM categories c JOIN category_groups g ON g.id = c.group_id
+		WHERE c.id = ?`, categoryID).Scan(&isIncome)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if isIncome != 0 {
+		return ErrIncomeCategoryNotBudgetable
+	}
+	return nil
+}
+
 func getBudgetEntryTx(ctx context.Context, tx *sql.Tx, categoryID, month string) (BudgetEntry, error) {
 	row := tx.QueryRowContext(ctx, `SELECT `+budgetEntryColumns+` FROM budget_entries WHERE category_id = ? AND month = ? AND deleted_at IS NULL`, categoryID, month)
 	e, err := scanBudgetEntry(row)
@@ -102,6 +124,9 @@ func SetBudgetedAmount(ctx context.Context, conn *sql.DB, id, categoryID, month 
 		if errors.Is(err, ErrNotFound) {
 			return ErrCategoryNotFound
 		}
+		return err
+	}
+	if err := rejectIncomeCategoryTx(ctx, tx, categoryID); err != nil {
 		return err
 	}
 

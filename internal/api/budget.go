@@ -1,12 +1,12 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
-	"sort"
 
 	"argos/internal/budget"
 	"argos/internal/db"
@@ -49,51 +49,62 @@ type monthBudget struct {
 	Categories []categoryBudget `json:"categories"`
 }
 
-// rollupCategory walks categoryID's full budget_entries/transaction history
-// up to and including month, applying internal/budget's Available() rule
-// (§5.3) forward from the earliest relevant month, so a rollover or an
-// overspend from arbitrarily far back still reaches the target month
-// correctly.
-func rollupCategory(entries []db.BudgetEntry, transactions []db.Transaction, categoryID, month string) categoryBudget {
-	budgetedByMonth := make(map[string]int64, len(entries))
-	for _, e := range entries {
-		budgetedByMonth[e.Month] = e.Budgeted
+// onBudgetAccountIDs returns the ids of every non-deleted on-budget account.
+// A transaction whose account is missing from the map (off-budget or
+// deleted) never counts toward activity (§5.3).
+func onBudgetAccountIDs(ctx context.Context, conn *sql.DB) (map[string]bool, []string, error) {
+	accounts, err := db.ListAccounts(ctx, conn)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	budgetTxns := make([]budget.Transaction, 0, len(transactions))
-	months := map[string]bool{month: true}
-	for _, t := range transactions {
-		budgetTxns = append(budgetTxns, budget.Transaction{CategoryID: t.CategoryID.String, Date: t.Date, Amount: t.Amount})
-		if len(t.Date) >= 7 {
-			months[t.Date[:7]] = true
+	ids := make(map[string]bool, len(accounts))
+	ordered := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		if a.OnBudget {
+			ids[a.ID] = true
+			ordered = append(ordered, a.ID)
 		}
 	}
-	for m := range budgetedByMonth {
-		months[m] = true
+	return ids, ordered, nil
+}
+
+// rollupCategory loads categoryID's history and hands it to
+// budget.RollupCategory.
+func rollupCategory(ctx context.Context, conn *sql.DB, onBudget map[string]bool, categoryID, month string) (categoryBudget, error) {
+	entryRows, err := db.ListBudgetEntriesForCategory(ctx, conn, categoryID)
+	if err != nil {
+		return categoryBudget{}, err
+	}
+	txnRows, err := db.ListTransactionsForCategory(ctx, conn, categoryID)
+	if err != nil {
+		return categoryBudget{}, err
 	}
 
-	ordered := make([]string, 0, len(months))
-	for m := range months {
-		if m <= month {
-			ordered = append(ordered, m)
-		}
+	entries := make([]budget.BudgetEntry, 0, len(entryRows))
+	for _, e := range entryRows {
+		entries = append(entries, budget.BudgetEntry{CategoryID: e.CategoryID, Month: e.Month, Budgeted: e.Budgeted})
 	}
-	sort.Strings(ordered)
+	transactions := make([]budget.Transaction, 0, len(txnRows))
+	for _, t := range txnRows {
+		bt := budget.Transaction{
+			AccountID: t.AccountID, CategoryID: t.CategoryID.String, Date: t.Date, Amount: t.Amount,
+			OnBudget: onBudget[t.AccountID],
+		}
+		if t.DeletedAt.Valid {
+			deletedAt := t.DeletedAt.Int64
+			bt.DeletedAt = &deletedAt
+		}
+		transactions = append(transactions, bt)
+	}
 
-	var previousAvailable int64
-	out := categoryBudget{CategoryID: categoryID, Month: month}
-	for _, m := range ordered {
-		budgeted := budgetedByMonth[m]
-		activity := budget.Activity(budgetTxns, categoryID, m)
-		available := budget.Available(previousAvailable, budgeted, activity)
-		previousAvailable = available
-		if m == month {
-			out.Budgeted = budgeted
-			out.Activity = activity
-			out.Available = available
-		}
-	}
-	return out
+	figures := budget.RollupCategory(entries, transactions, categoryID, month)
+	return categoryBudget{
+		CategoryID: categoryID,
+		Month:      month,
+		Budgeted:   figures.Budgeted,
+		Activity:   figures.Activity,
+		Available:  figures.Available,
+	}, nil
 }
 
 func (h *BudgetHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -102,62 +113,57 @@ func (h *BudgetHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "month must be in YYYY-MM format")
 		return
 	}
+	ctx := r.Context()
 
-	categories, err := db.ListCategories(r.Context(), h.DB)
+	onBudget, onBudgetIDs, err := onBudgetAccountIDs(ctx, h.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	groups, err := db.ListCategoryGroups(ctx, h.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	incomeGroups := make(map[string]bool)
+	for _, g := range groups {
+		if g.IsIncome {
+			incomeGroups[g.ID] = true
+		}
+	}
+	categories, err := db.ListCategories(ctx, h.DB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
 
 	out := make([]categoryBudget, 0, len(categories))
-	// Accumulated alongside the per-category rollup rather than in a second
-	// pass over the same entries: §5.3's "everything already budgeted
-	// across all months to date" means every non-deleted budget_entries row
-	// up to and including the requested month, across every category.
-	var budgetedToDate int64
+	nonIncomeAvailable := make([]int64, 0, len(categories))
 	for _, c := range categories {
-		entries, err := db.ListBudgetEntriesForCategory(r.Context(), h.DB, c.ID)
+		figures, err := rollupCategory(ctx, h.DB, onBudget, c.ID, month)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 			return
 		}
-		transactions, err := db.ListTransactionsForCategory(r.Context(), h.DB, c.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
-			return
-		}
-		out = append(out, rollupCategory(entries, transactions, c.ID, month))
-
-		for _, e := range entries {
-			if e.Month <= month {
-				budgetedToDate += e.Budgeted
-			}
+		out = append(out, figures)
+		if !incomeGroups[c.GroupID] {
+			nonIncomeAvailable = append(nonIncomeAvailable, figures.Available)
 		}
 	}
 
-	accounts, err := db.ListAccounts(r.Context(), h.DB)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
-		return
-	}
-	// §5.3: to_budget only counts on-budget accounts — off-budget balances
-	// (e.g. a tracked investment account) never affect what there is to budget.
-	balances := make([]int64, 0, len(accounts))
-	for _, a := range accounts {
-		if !a.OnBudget {
-			continue
-		}
-		balance, err := accountBalance(r.Context(), h.DB, a.ID)
+	balances := make([]int64, 0, len(onBudgetIDs))
+	for _, id := range onBudgetIDs {
+		rows, err := db.ListTransactionAmountsForAccount(ctx, h.DB, id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 			return
 		}
-		balances = append(balances, balance)
+		balances = append(balances, budget.BalanceThrough(id, month, transactionAmounts(rows)))
 	}
 
 	writeJSON(w, http.StatusOK, monthBudget{
 		Month:      month,
-		ToBudget:   budget.ToBudget(balances, budgetedToDate),
+		ToBudget:   budget.ToBudget(balances, nonIncomeAvailable),
 		Categories: out,
 	})
 }
@@ -210,20 +216,23 @@ func (h *BudgetHandler) Set(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, db.ErrCategoryNotFound):
 		writeError(w, http.StatusNotFound, "CATEGORY_NOT_FOUND", "no category with this id")
 		return
+	case errors.Is(err, db.ErrIncomeCategoryNotBudgetable):
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "income-group categories cannot be budgeted")
+		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
 
-	entries, err := db.ListBudgetEntriesForCategory(r.Context(), h.DB, categoryID)
+	onBudget, _, err := onBudgetAccountIDs(r.Context(), h.DB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
-	transactions, err := db.ListTransactionsForCategory(r.Context(), h.DB, categoryID)
+	figures, err := rollupCategory(r.Context(), h.DB, onBudget, categoryID, month)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, rollupCategory(entries, transactions, categoryID, month))
+	writeJSON(w, http.StatusOK, figures)
 }

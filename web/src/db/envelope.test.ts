@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { activity, available, rollupCategory, toBudget } from "./envelope";
-import type { Account, BudgetEntry, Transaction } from "./types";
+import {
+  activity,
+  available,
+  balanceThrough,
+  onBudgetAccountIds,
+  rollupCategory,
+  toBudget,
+} from "./envelope";
+import type { Account, BudgetEntry, Category, CategoryGroup, Transaction } from "./types";
 
 function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
   return {
@@ -40,6 +47,36 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
   };
 }
 
+function makeGroup(overrides: Partial<CategoryGroup> = {}): CategoryGroup {
+  return {
+    id: crypto.randomUUID(),
+    hlc_physical: 0,
+    hlc_counter: 0,
+    hlc_node_id: "node-1",
+    deleted_at: null,
+    name: "Bills",
+    is_income: false,
+    sort_order: 0,
+    ...overrides,
+  };
+}
+
+function makeCategory(overrides: Partial<Category> = {}): Category {
+  return {
+    id: crypto.randomUUID(),
+    hlc_physical: 0,
+    hlc_counter: 0,
+    hlc_node_id: "node-1",
+    deleted_at: null,
+    group_id: "bills",
+    name: "Groceries",
+    hidden: false,
+    sort_order: 0,
+    notes: null,
+    ...overrides,
+  };
+}
+
 function makeBudgetEntry(overrides: Partial<BudgetEntry> = {}): BudgetEntry {
   return {
     id: crypto.randomUUID(),
@@ -54,6 +91,8 @@ function makeBudgetEntry(overrides: Partial<BudgetEntry> = {}): BudgetEntry {
   };
 }
 
+const onBudget = new Set(["acc-1"]);
+
 describe("activity", () => {
   it("sums transaction amounts for the given category and month", () => {
     const total = activity(
@@ -61,6 +100,7 @@ describe("activity", () => {
         makeTransaction({ date: "2026-03-05", amount: -1000 }),
         makeTransaction({ date: "2026-03-20", amount: -500 }),
       ],
+      onBudget,
       "cat-1",
       "2026-03",
     );
@@ -68,14 +108,15 @@ describe("activity", () => {
   });
 
   it("is zero with no matching transactions", () => {
-    expect(activity([], "cat-1", "2026-03")).toBe(0);
+    expect(activity([], onBudget, "cat-1", "2026-03")).toBe(0);
   });
 
-  it("ignores other categories, other months, and soft-deleted rows", () => {
+  it("ignores other categories, other months, off-budget accounts, and soft-deleted rows", () => {
     const total = activity(
       [
         makeTransaction({ category_id: "cat-2", date: "2026-03-05", amount: -1000 }),
         makeTransaction({ category_id: "cat-1", date: "2026-04-05", amount: -1000 }),
+        makeTransaction({ account_id: "acc-off", date: "2026-03-05", amount: -1000 }),
         makeTransaction({
           category_id: "cat-1",
           date: "2026-03-05",
@@ -83,6 +124,7 @@ describe("activity", () => {
           deleted_at: Date.now(),
         }),
       ],
+      onBudget,
       "cat-1",
       "2026-03",
     );
@@ -116,7 +158,7 @@ describe("rollupCategory", () => {
     const entries = [makeBudgetEntry({ month: "2026-03", budgeted: 5000 })];
     const transactions = [makeTransaction({ date: "2026-03-10", amount: -2000 })];
 
-    expect(rollupCategory(entries, transactions, "cat-1", "2026-03")).toEqual({
+    expect(rollupCategory(entries, transactions, onBudget, "cat-1", "2026-03")).toEqual({
       budgeted: 5000,
       activity: -2000,
       available: 3000,
@@ -129,7 +171,7 @@ describe("rollupCategory", () => {
 
     // February and March have no budget entry and no activity at all; the
     // 6000 left over from January should still be sitting there in March.
-    expect(rollupCategory(entries, transactions, "cat-1", "2026-03")).toEqual({
+    expect(rollupCategory(entries, transactions, onBudget, "cat-1", "2026-03")).toEqual({
       budgeted: 0,
       activity: 0,
       available: 6000,
@@ -147,7 +189,7 @@ describe("rollupCategory", () => {
 
     // January: 0 + 1000 - 3000 = -2000 (overspent)
     // February: reset to 0, then + 500 budgeted + 0 activity = 500
-    expect(rollupCategory(entries, transactions, "cat-1", "2026-02")).toEqual({
+    expect(rollupCategory(entries, transactions, onBudget, "cat-1", "2026-02")).toEqual({
       budgeted: 500,
       activity: 0,
       available: 500,
@@ -164,7 +206,7 @@ describe("rollupCategory", () => {
       makeTransaction({ category_id: "cat-2", date: "2026-03-05", amount: -9999 }),
     ];
 
-    expect(rollupCategory(entries, transactions, "cat-1", "2026-03")).toEqual({
+    expect(rollupCategory(entries, transactions, onBudget, "cat-1", "2026-03")).toEqual({
       budgeted: 1000,
       activity: -100,
       available: 900,
@@ -178,7 +220,7 @@ describe("rollupCategory", () => {
     ];
     const transactions = [makeTransaction({ date: "2026-04-01", amount: -999_999 })];
 
-    expect(rollupCategory(entries, transactions, "cat-1", "2026-03")).toEqual({
+    expect(rollupCategory(entries, transactions, onBudget, "cat-1", "2026-03")).toEqual({
       budgeted: 1000,
       activity: 0,
       available: 1000,
@@ -190,7 +232,7 @@ describe("rollupCategory", () => {
       makeBudgetEntry({ month: "2026-03", budgeted: 1000, deleted_at: Date.now() }),
     ];
 
-    expect(rollupCategory(entries, [], "cat-1", "2026-03")).toEqual({
+    expect(rollupCategory(entries, [], onBudget, "cat-1", "2026-03")).toEqual({
       budgeted: 0,
       activity: 0,
       available: 0,
@@ -198,35 +240,69 @@ describe("rollupCategory", () => {
   });
 });
 
-// Mirrors internal/api/budget_test.go's TestBudgetGet_* cases (same
-// scenario, same expected totals), so the two independent implementations
-// of §5.3's "Available to Budget" stay provably in sync.
+describe("balanceThrough", () => {
+  it("sums non-deleted transactions in the account dated on or before the month's last day", () => {
+    const transactions = [
+      makeTransaction({ date: "2026-02-28", amount: 1000 }),
+      makeTransaction({ date: "2026-03-01", amount: 200 }),
+      makeTransaction({ date: "2026-03-31", amount: 30 }),
+      makeTransaction({ date: "2026-04-01", amount: 99_999 }),
+      makeTransaction({ date: "2026-03-15", amount: 99_999, deleted_at: Date.now() }),
+      makeTransaction({ account_id: "acc-2", date: "2026-03-15", amount: 99_999 }),
+    ];
+
+    expect(balanceThrough(transactions, "acc-1", "2026-03")).toBe(1230);
+    expect(balanceThrough(transactions, "acc-1", "2026-01")).toBe(0);
+  });
+});
+
+describe("onBudgetAccountIds", () => {
+  it("includes only non-deleted on-budget accounts", () => {
+    const ids = onBudgetAccountIds([
+      makeAccount({ id: "on" }),
+      makeAccount({ id: "off", on_budget: false }),
+      makeAccount({ id: "deleted", deleted_at: Date.now() }),
+    ]);
+    expect([...ids]).toEqual(["on"]);
+  });
+});
+
 describe("toBudget", () => {
-  it("subtracts everything budgeted to date from on-budget account balances", () => {
-    const onBudget = makeAccount({ id: "acc-1", on_budget: true });
-    const offBudget = makeAccount({ id: "acc-2", on_budget: false });
+  // Mirrors internal/api/budget_test.go's TestBudgetGet_IncludesToBudget.
+  it("subtracts non-income available from on-budget balances", () => {
+    const onBudgetAccount = makeAccount({ id: "acc-1", on_budget: true });
+    const offBudgetAccount = makeAccount({ id: "acc-2", on_budget: false });
+    const groups = [makeGroup({ id: "bills" })];
+    const categories = [makeCategory({ id: "cat-1" })];
     const transactions = [
       makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
-      makeTransaction({ account_id: "acc-2", date: "2026-01-15", amount: 500000 }),
+      makeTransaction({ account_id: "acc-2", category_id: null, date: "2026-01-15", amount: 500000 }),
     ];
     const entries = [makeBudgetEntry({ month: "2026-01", budgeted: 20000 })];
 
-    // 100000 (on-budget balance only) - 20000 (budgeted) = 80000
-    expect(toBudget([onBudget, offBudget], transactions, entries, "2026-01")).toBe(80000);
+    // 100000 balance - 120000 available (20000 budgeted + 100000 activity)
+    expect(
+      toBudget([onBudgetAccount, offBudgetAccount], groups, categories, transactions, entries, "2026-01"),
+    ).toBe(-20000);
   });
 
+  // Mirrors TestBudgetGet_ToBudgetExcludesFutureMonthsBudgeted.
   it("excludes budget entries assigned to months after the one being viewed", () => {
     const account = makeAccount({ id: "acc-1" });
+    const groups = [makeGroup({ id: "bills" })];
+    const categories = [makeCategory({ id: "cat-1" })];
     const transactions = [
-      makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
+      makeTransaction({ account_id: "acc-1", category_id: null, date: "2026-01-15", amount: 100000 }),
     ];
     const entries = [makeBudgetEntry({ month: "2026-02", budgeted: 30000 })];
 
-    expect(toBudget([account], transactions, entries, "2026-01")).toBe(100000);
+    expect(toBudget([account], groups, categories, transactions, entries, "2026-01")).toBe(100000);
   });
 
   it("ignores deleted accounts and deleted budget entries", () => {
     const account = makeAccount({ id: "acc-1", deleted_at: Date.now() });
+    const groups = [makeGroup({ id: "bills" })];
+    const categories = [makeCategory({ id: "cat-1" })];
     const transactions = [
       makeTransaction({ account_id: "acc-1", date: "2026-01-15", amount: 100000 }),
     ];
@@ -234,6 +310,148 @@ describe("toBudget", () => {
       makeBudgetEntry({ month: "2026-01", budgeted: 20000, deleted_at: Date.now() }),
     ];
 
-    expect(toBudget([account], transactions, entries, "2026-01")).toBe(0);
+    expect(toBudget([account], groups, categories, transactions, entries, "2026-01")).toBe(0);
+  });
+});
+
+// Same cases and numbers as internal/budget/envelope_test.go's
+// TestToBudgetInvariant, so both engines provably agree.
+describe("toBudget invariant", () => {
+  const checking = makeAccount({ id: "checking" });
+  const investment = makeAccount({ id: "investment", on_budget: false });
+  const bills = makeGroup({ id: "bills" });
+  const incomeGroup = makeGroup({ id: "income", is_income: true });
+  const groceries = makeCategory({ id: "groceries", group_id: "bills" });
+  const salary = makeCategory({ id: "salary", group_id: "income", name: "Salary" });
+  const paycheck = makeTransaction({
+    account_id: "checking",
+    category_id: null,
+    date: "2026-09-01",
+    amount: 1000,
+  });
+  const groceriesSep = makeBudgetEntry({ category_id: "groceries", month: "2026-09", budgeted: 100 });
+  const spend = (amount: number, overrides: Partial<Transaction> = {}) =>
+    makeTransaction({
+      account_id: "checking",
+      category_id: "groceries",
+      date: "2026-09-10",
+      amount,
+      ...overrides,
+    });
+
+  const cases: {
+    name: string;
+    accounts: Account[];
+    categories: Category[];
+    entries: BudgetEntry[];
+    transactions: Transaction[];
+    month: string;
+    wantToBudget: number;
+    wantAvailable: Record<string, number>;
+  }[] = [
+    {
+      name: "categorized spending under budget",
+      accounts: [checking],
+      categories: [groceries],
+      entries: [groceriesSep],
+      transactions: [paycheck, spend(-60)],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: 40 },
+    },
+    {
+      name: "overspending in September",
+      accounts: [checking],
+      categories: [groceries],
+      entries: [groceriesSep],
+      transactions: [paycheck, spend(-150)],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: -50 },
+    },
+    {
+      name: "October after September overspending",
+      accounts: [checking],
+      categories: [groceries],
+      entries: [groceriesSep],
+      transactions: [paycheck, spend(-150)],
+      month: "2026-10",
+      wantToBudget: 850,
+      wantAvailable: { groceries: 0 },
+    },
+    {
+      name: "inflow categorized into an income-group category",
+      accounts: [checking],
+      categories: [groceries, salary],
+      entries: [groceriesSep],
+      transactions: [{ ...paycheck, category_id: "salary" }, spend(-60)],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: 40, salary: 1000 },
+    },
+    {
+      name: "categorized transaction in an off-budget account",
+      accounts: [checking, investment],
+      categories: [groceries],
+      entries: [groceriesSep],
+      transactions: [
+        paycheck,
+        spend(-60),
+        makeTransaction({ account_id: "investment", category_id: null, date: "2026-09-01", amount: 5000 }),
+        spend(-500, { account_id: "investment", date: "2026-09-12" }),
+      ],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: 40 },
+    },
+    {
+      name: "transaction dated after the month",
+      accounts: [checking],
+      categories: [groceries],
+      entries: [groceriesSep],
+      transactions: [
+        paycheck,
+        spend(-60),
+        makeTransaction({ account_id: "checking", category_id: null, date: "2026-10-01", amount: 200 }),
+        spend(-30, { date: "2026-10-02" }),
+      ],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: 40 },
+    },
+    {
+      name: "budget entry in a month after the one viewed",
+      accounts: [checking],
+      categories: [groceries],
+      entries: [
+        groceriesSep,
+        makeBudgetEntry({ category_id: "groceries", month: "2026-10", budgeted: 300 }),
+      ],
+      transactions: [paycheck, spend(-60)],
+      month: "2026-09",
+      wantToBudget: 900,
+      wantAvailable: { groceries: 40 },
+    },
+  ];
+
+  it.each(cases)("$name", (c) => {
+    const groups = [bills, incomeGroup];
+    const result = toBudget(c.accounts, groups, c.categories, c.transactions, c.entries, c.month);
+    expect(result).toBe(c.wantToBudget);
+
+    const onBudgetIds = onBudgetAccountIds(c.accounts);
+    let balanceSum = 0;
+    for (const id of onBudgetIds) balanceSum += balanceThrough(c.transactions, id, c.month);
+
+    let nonIncomeAvailable = 0;
+    for (const category of c.categories) {
+      const figures = rollupCategory(c.entries, c.transactions, onBudgetIds, category.id, c.month);
+      if (category.id in c.wantAvailable) {
+        expect(figures.available).toBe(c.wantAvailable[category.id]);
+      }
+      if (category.group_id !== incomeGroup.id) nonIncomeAvailable += figures.available;
+    }
+
+    expect(result + nonIncomeAvailable).toBe(balanceSum);
   });
 });

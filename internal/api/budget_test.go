@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"argos/internal/db"
@@ -90,15 +91,121 @@ func TestBudgetGet_IncludesToBudget(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// to_budget = on-budget balance (100000) - budgeted to date (20000).
-	// The off-budget account's 500000 balance must not appear in this figure.
-	if out.ToBudget != 80000 {
-		t.Fatalf("expected to_budget 80000, got %d", out.ToBudget)
-	}
-	// The category's own available (budgeted + activity, §5.3) is a
-	// different figure from to_budget — 20000 budgeted + 100000 activity.
+	// The 100000 inflow was categorized into Groceries (a non-income
+	// category), so it sits in that envelope: available = 20000 budgeted +
+	// 100000 activity = 120000. §5.3's invariant is to_budget + Σ non-income
+	// available = Σ on-budget balance, so to_budget = 100000 - 120000 =
+	// -20000. The off-budget account's 500000 balance appears in neither.
 	if len(out.Categories) != 1 || out.Categories[0].Available != 120000 {
 		t.Fatalf("expected the one category's available to be 120000, got %+v", out.Categories)
+	}
+	if out.ToBudget != -20000 {
+		t.Fatalf("expected to_budget -20000, got %d", out.ToBudget)
+	}
+}
+
+func TestBudgetGet_IncomeCategoryInflowReachesToBudgetThroughBalance(t *testing.T) {
+	conn := newTestDB(t)
+	h := &BudgetHandler{DB: conn}
+	sh := &SyncHandler{DB: conn}
+
+	postSync(t, sh, `{
+		"since": 0,
+		"mutations": [
+			{"table": "accounts", "op": "upsert", "group_id": null, "row": {
+				"id": "11111111-1111-1111-1111-111111111111",
+				"name": "Checking", "type": "checking", "on_budget": true, "closed": false, "currency": "USD",
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}},
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333",
+				"name": "Income", "is_income": true, "sort_order": 0,
+				"hlc_physical": 1000, "hlc_counter": 1, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+	if _, err := db.CreateCategory(t.Context(), conn, db.NewCategory{
+		ID:          "44444444-4444-4444-4444-444444444444",
+		GroupID:     "33333333-3333-3333-3333-333333333333",
+		Name:        "Salary",
+		HLCPhysical: 1000, HLCCounter: 2, HLCNodeID: "22222222-2222-2222-2222-222222222222",
+	}); err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	if _, err := db.CreateTransaction(t.Context(), conn, db.NewTransaction{
+		ID:          "55555555-5555-5555-5555-555555555555",
+		AccountID:   "11111111-1111-1111-1111-111111111111",
+		CategoryID:  sql.NullString{String: "44444444-4444-4444-4444-444444444444", Valid: true},
+		Date:        "2026-01-15",
+		Amount:      100000,
+		HLCPhysical: 1000, HLCCounter: 3, HLCNodeID: "22222222-2222-2222-2222-222222222222",
+	}); err != nil {
+		t.Fatalf("CreateTransaction: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/budget/2026-01", nil)
+	req.SetPathValue("month", "2026-01")
+	w := httptest.NewRecorder()
+	h.Get(w, req)
+
+	var out monthBudget
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Salary's available (100000) is not subtracted — the money is counted
+	// once, through the balance.
+	if out.ToBudget != 100000 {
+		t.Fatalf("expected to_budget 100000, got %d", out.ToBudget)
+	}
+}
+
+func TestBudgetSet_RejectsIncomeCategory(t *testing.T) {
+	conn := newTestDB(t)
+	h := &BudgetHandler{DB: conn}
+	sh := &SyncHandler{DB: conn}
+
+	postSync(t, sh, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333",
+				"name": "Income", "is_income": true, "sort_order": 0,
+				"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}},
+			{"table": "categories", "op": "upsert", "group_id": null, "row": {
+				"id": "44444444-4444-4444-4444-444444444444", "group_id": "33333333-3333-3333-3333-333333333333",
+				"name": "Salary", "hidden": false, "sort_order": 0,
+				"hlc_physical": 1000, "hlc_counter": 1, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/budget/2026-01/44444444-4444-4444-4444-444444444444", strings.NewReader(`{
+		"id": "88888888-8888-8888-8888-888888888888", "budgeted": 5000,
+		"hlc_physical": 1000, "hlc_counter": 2, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+	}`))
+	req.SetPathValue("month", "2026-01")
+	req.SetPathValue("category_id", "44444444-4444-4444-4444-444444444444")
+	w := httptest.NewRecorder()
+	h.Set(w, req)
+
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"VALIDATION_ERROR"`) {
+		t.Fatalf("expected 400 VALIDATION_ERROR, got %d: %s", w.Code, w.Body.String())
+	}
+
+	resp := postSync(t, sh, `{
+		"since": 0,
+		"mutations": [
+			{"table": "budget_entries", "op": "upsert", "group_id": null, "row": {
+				"id": "88888888-8888-8888-8888-888888888888", "category_id": "44444444-4444-4444-4444-444444444444",
+				"month": "2026-01", "budgeted": 5000,
+				"hlc_physical": 1000, "hlc_counter": 3, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_invalid" ||
+		resp.Results[0].Error == nil || resp.Results[0].Error.Code != "SYNC_MUTATION_INVALID" {
+		t.Fatalf("expected rejected_invalid SYNC_MUTATION_INVALID, got %+v", resp.Results)
 	}
 }
 

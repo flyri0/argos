@@ -383,6 +383,9 @@ func SyncUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, in SyncBudgetEntry) 
 	if !exists {
 		return ErrCategoryNotFound
 	}
+	if err := rejectIncomeCategoryTx(ctx, tx, in.CategoryID); err != nil {
+		return err
+	}
 
 	var conflictingID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM budget_entries WHERE category_id = ? AND month = ? AND id != ?`, in.CategoryID, in.Month, in.ID).Scan(&conflictingID)

@@ -26,6 +26,11 @@ const baseSync = {
 };
 
 const month = new Date().toISOString().slice(0, 7);
+const nextMonth = (() => {
+  const [year, mon] = month.split("-").map(Number);
+  const date = new Date(Date.UTC(year, mon, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+})();
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
   return {
@@ -142,6 +147,7 @@ describe("BudgetScreen", () => {
   });
 
   it("rolls a positive available forward into the next month", async () => {
+    await accounts.create(makeAccount({ id: "acc-1" }));
     const group = makeGroup();
     const category = makeCategory({ group_id: group.id, name: "Rent" });
     await categoryGroups.create(group);
@@ -178,19 +184,41 @@ describe("BudgetScreen", () => {
     await categories.create(category);
 
     await transactions.create(
-      makeTransaction({ account_id: "acc-on", category_id: category.id, amount: 100000 }),
+      makeTransaction({ account_id: "acc-on", category_id: null, amount: 100000 }),
+    );
+    await transactions.create(
+      makeTransaction({ account_id: "acc-on", category_id: category.id, amount: -6000 }),
     );
     await transactions.create(
       makeTransaction({ account_id: "acc-off", category_id: category.id, amount: 500000 }),
     );
     await budgetEntries.create(
-      makeBudgetEntry({ category_id: category.id, month, budgeted: 20000 }),
+      makeBudgetEntry({ category_id: category.id, month, budgeted: 10000 }),
+    );
+    await budgetEntries.create(
+      makeBudgetEntry({ category_id: category.id, month: nextMonth, budgeted: 30000 }),
     );
 
     render(<BudgetScreen />);
 
-    // 100000 (on-budget only) - 20000 (budgeted) = 80000
-    expect(await screen.findByText("Available to Budget: $800.00")).toBeInTheDocument();
+    // Balance 94000 (on-budget only) - Rent available 4000 = 90000; the
+    // spending isn't subtracted twice and next month's entry doesn't count.
+    expect(await screen.findByText("Available to Budget: $900.00")).toBeInTheDocument();
+  });
+
+  it("shows income-group categories read-only and leaves their inflows in to_budget", async () => {
+    await accounts.create(makeAccount({ id: "acc-1" }));
+    const incomeGroup = makeGroup({ name: "Income", is_income: true });
+    const salary = makeCategory({ group_id: incomeGroup.id, name: "Salary" });
+    await categoryGroups.create(incomeGroup);
+    await categories.create(salary);
+    await transactions.create(makeTransaction({ category_id: salary.id, amount: 100000 }));
+
+    render(<BudgetScreen />);
+
+    const row = (await screen.findByText("Salary")).closest("tr")!;
+    expect(within(row).queryByLabelText("Budgeted for Salary")).toBeNull();
+    expect(await screen.findByText("Available to Budget: $1,000.00")).toBeInTheDocument();
   });
 
   it("shows a hidden badge for hidden categories", async () => {

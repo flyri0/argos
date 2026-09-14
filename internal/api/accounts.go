@@ -80,18 +80,20 @@ func accountBalance(ctx context.Context, conn *sql.DB, accountID string) (int64,
 	if err != nil {
 		return 0, err
 	}
+	return budget.AccountBalance(accountID, transactionAmounts(rows)), nil
+}
 
+func transactionAmounts(rows []db.TransactionAmount) []budget.Transaction {
 	transactions := make([]budget.Transaction, 0, len(rows))
 	for _, r := range rows {
-		t := budget.Transaction{AccountID: r.AccountID, Amount: r.Amount}
+		t := budget.Transaction{AccountID: r.AccountID, Date: r.Date, Amount: r.Amount}
 		if r.DeletedAt.Valid {
 			deletedAt := r.DeletedAt.Int64
 			t.DeletedAt = &deletedAt
 		}
 		transactions = append(transactions, t)
 	}
-
-	return budget.AccountBalance(accountID, transactions), nil
+	return transactions
 }
 
 type apiErrorBody struct {

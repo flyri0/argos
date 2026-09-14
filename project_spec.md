@@ -262,6 +262,7 @@ budget_entries
                                  -- storing a zero (a no-op if no row exists yet) — §5.4 relies on
                                  -- "does any row exist" as its in-use signal, and a zero row left
                                  -- lingering forever would make that signal meaningless.
+                                 -- category_id must not belong to the income group (§5.3).
 
 server_meta                     -- single row, not synced to clients as a normal record
   sync_id        uuid           -- generated once, on first run. Changes only on an explicit reset
@@ -289,9 +290,12 @@ Tables intentionally **not** in the MVP but designed for without any planned sch
 ### 5.3 Derived values (computed, not stored as raw truth)
 
 - `balance` for an account = sum of `amount` across all non-deleted transactions in that account. Never stored; always computed. For performance on large histories, an index on `transactions(account_id, deleted_at)` keeps this a cheap aggregate query, and the server may cache the result in memory — but the cache is a read optimization only, never the value written to disk or synced.
-- `activity` for a category/month = sum of transaction amounts in that category for that month.
-- `available` for a category/month = `available` from the previous month (if positive; reset to 0 if the previous month ended negative, per the overspending rule) + `budgeted` (this month) + `activity` (this month).
-- `to_budget` for a month = total account balances of on-budget accounts, minus everything already budgeted across all months to date.
+- `activity(c, M)` for a category/month = sum of `amount` across non-deleted transactions in category `c` dated in month `M` **whose account is on-budget and non-deleted**. A categorized transaction in an off-budget account never affects a category.
+- `available(c, M)` for a category/month = `available` from the previous month (if positive; reset to 0 if the previous month ended negative, per the overspending rule) + `budgeted` (this month) + `activity` (this month).
+- `balance_through(a, M)` for an account/month = sum of `amount` across non-deleted transactions in account `a` dated on or before the last day of `M`.
+- `to_budget(M)` for a month = Σ `balance_through(a, M)` over non-deleted on-budget accounts − Σ `available(c, M)` over every non-deleted category that is **not** in the income group.
+- **Invariant**: `to_budget(M) + Σ available(c, M)` (non-income categories) `= Σ balance_through(a, M)` (on-budget accounts). Every unit of on-budget money is either still unassigned or sitting in exactly one envelope. Subtracting "everything budgeted to date" from the balance instead would count categorized spending twice — once in the balance, once in the category's `available`.
+- Income-group categories are not budgeted: transactions categorized into them reach `to_budget` through the account balances, and their `available` is never subtracted. Budget entries for an income-group category are rejected — `PUT /api/budget/:month/:category_id` returns `400 VALIDATION_ERROR`, and a `budget_entries` upsert via `/sync` is `rejected_invalid` with `SYNC_MUTATION_INVALID` — and the budget grid shows income-group rows read-only.
 
 The exact rollover and overspending rules are the most important — and most error-prone — piece of business logic in the app. They should live in a pure, well-tested module shared conceptually between client and server (even if implemented twice in Go and TypeScript for the MVP).
 
@@ -363,7 +367,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `PAIRING_CODE_NOT_FOUND` | 404 | `GET /api/pairing/request/:code` named a code that's unknown, already retrieved, or past its 10-minute expiry (§6.2) |
 | `DEVICE_NOT_FOUND` | 404 | no device with the given `:id` (§6.2) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
-| `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid or references a row that doesn't exist |
+| `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid, references a row that doesn't exist, or fails a domain-specific check (e.g. a `budget_entries` row for an income-group category, §5.3) |
 | `VALIDATION_ERROR` | 400 | a request field is missing, malformed, or fails a domain-specific check (wrong format, wrong type, must reference a different row, etc.) |
 | `INVALID_JSON` | 400 | the request body could not be parsed as JSON |
 | `INTERNAL_ERROR` | 500 | an unexpected server-side error (e.g. a database I/O failure) unrelated to the caller's input |
@@ -392,7 +396,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `PATCH` | `/api/transactions/:id` | Update transaction |
 | `DELETE` | `/api/transactions/:id` | Delete transaction (soft delete — sets `deleted_at`, see §5.1) |
 | `GET` | `/api/budget/:month` | Get budget entries + computed availability for a month |
-| `PUT` | `/api/budget/:month/:category_id` | Set budgeted amount (deletes the row if set to 0, see §5.2) |
+| `PUT` | `/api/budget/:month/:category_id` | Set budgeted amount (deletes the row if set to 0, see §5.2); `400 VALIDATION_ERROR` for an income-group category (§5.3) |
 | `POST` | `/api/pairing/bootstrap` | First device claims the printed setup code (§6.1); `410 Gone` once `devices` is non-empty |
 | `POST` | `/api/pairing/request` | Unpaired device requests access, receives a pairing code |
 | `GET` | `/api/pairing/request/:code` | Waiting device polls its code for approval status; returns the token exactly once approved (§6.2) |

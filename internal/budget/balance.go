@@ -13,6 +13,9 @@ type Transaction struct {
 	Date       string // "YYYY-MM-DD" (§5.1)
 	Amount     int64
 	DeletedAt  *int64
+	// OnBudget is whether the transaction's account is on-budget and
+	// non-deleted; only such transactions count toward activity (§5.3).
+	OnBudget bool
 }
 
 // AccountBalance sums the amount of every non-deleted transaction belonging

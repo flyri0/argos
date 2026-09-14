@@ -7,6 +7,7 @@ import {
   budgetEntries,
   categories,
   categoryGroups,
+  onBudgetAccountIds,
   rollupCategory,
   setBudgetedAmount,
   toBudget,
@@ -76,21 +77,30 @@ export function BudgetScreen() {
   }, [allCategories]);
 
   const toBudgetValue = useMemo(
-    () => toBudget(allAccounts ?? [], allTransactions ?? [], allBudgetEntries ?? [], month),
-    [allAccounts, allTransactions, allBudgetEntries, month],
+    () =>
+      toBudget(
+        allAccounts ?? [],
+        allGroups ?? [],
+        allCategories ?? [],
+        allTransactions ?? [],
+        allBudgetEntries ?? [],
+        month,
+      ),
+    [allAccounts, allGroups, allCategories, allTransactions, allBudgetEntries, month],
   );
 
   const figuresByCategory = useMemo(() => {
+    const onBudget = onBudgetAccountIds(allAccounts ?? []);
     const map = new Map<string, CategoryMonthFigures>();
     for (const category of allCategories ?? []) {
       if (category.deleted_at !== null) continue;
       map.set(
         category.id,
-        rollupCategory(allBudgetEntries ?? [], allTransactions ?? [], category.id, month),
+        rollupCategory(allBudgetEntries ?? [], allTransactions ?? [], onBudget, category.id, month),
       );
     }
     return map;
-  }, [allCategories, allBudgetEntries, allTransactions, month]);
+  }, [allAccounts, allCategories, allBudgetEntries, allTransactions, month]);
 
   async function handleBudgetedCommit(categoryId: string, text: string) {
     await setBudgetedAmount(categoryId, month, parseAmountInput(text));
@@ -153,15 +163,21 @@ export function BudgetScreen() {
                           {category.hidden && ` (${t("budget.hiddenBadge")})`}
                         </td>
                         <td>
-                          <input
-                            key={`${category.id}-${month}`}
-                            aria-label={t("budget.budgetedFor", { category: category.name })}
-                            inputMode="decimal"
-                            defaultValue={(figures.budgeted / 100).toFixed(2)}
-                            onBlur={(event) =>
-                              handleBudgetedCommit(category.id, event.target.value)
-                            }
-                          />
+                          {/* §5.3: income-group categories are not budgeted
+                              — their inflows reach to_budget via balances. */}
+                          {group.is_income ? (
+                            formatCurrency(figures.budgeted)
+                          ) : (
+                            <input
+                              key={`${category.id}-${month}`}
+                              aria-label={t("budget.budgetedFor", { category: category.name })}
+                              inputMode="decimal"
+                              defaultValue={(figures.budgeted / 100).toFixed(2)}
+                              onBlur={(event) =>
+                                handleBudgetedCommit(category.id, event.target.value)
+                              }
+                            />
+                          )}
                         </td>
                         <td>{formatCurrency(figures.activity)}</td>
                         <td>{formatCurrency(figures.available)}</td>

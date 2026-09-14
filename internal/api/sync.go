@@ -628,6 +628,8 @@ func applyUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, row json.RawMessage
 	switch {
 	case errors.Is(err, db.ErrCategoryNotFound):
 		return errors.New("category_id does not reference an existing category")
+	case errors.Is(err, db.ErrIncomeCategoryNotBudgetable):
+		return errors.New("category_id belongs to the income group, which cannot be budgeted")
 	case errors.Is(err, db.ErrBudgetEntryConflict):
 		return errors.New("a budget entry for this category and month already exists under a different id")
 	default:
