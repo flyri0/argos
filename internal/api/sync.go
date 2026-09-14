@@ -19,11 +19,18 @@ import (
 // allowed to win every future conflict.
 const maxClockSkew = 5 * time.Minute
 
-// errRejectedStale signals that an existing row's HLC was greater than or
-// equal to the incoming mutation's (§2.3) — expected conflict-resolution
+// errRejectedStale signals that an existing row's HLC was strictly greater
+// than the incoming mutation's (§2.3) — expected conflict-resolution
 // behavior, not an error, so it is reported as "rejected_stale" rather than
 // via the "rejected_invalid" + error-object shape (§2.4).
-var errRejectedStale = errors.New("existing row has a greater or equal HLC")
+var errRejectedStale = errors.New("existing row has a greater HLC")
+
+// errAlreadyApplied signals an incoming HLC exactly equal to the stored
+// row's: the same write arriving again (e.g. a retry after a lost response).
+// applyUnit skips such a member instead of aborting the unit, so a retried
+// operation merged with a newer one in the same unit can't discard the newer
+// edit (§2.4).
+var errAlreadyApplied = errors.New("existing row already has this HLC")
 
 // clockSkewError signals an incoming HLC whose physical component is more
 // than maxClockSkew ahead of the server's own clock — reported as
@@ -222,8 +229,10 @@ func rowID(row json.RawMessage) string {
 }
 
 // applyUnit applies every mutation in u within one transaction: all succeed
-// together, or the whole unit is reported as a single "rejected_invalid"
-// result and none of its mutations take effect (§2.3).
+// together, or the whole unit is reported as a single rejected result and
+// none of its mutations take effect (§2.3). Members already applied (equal
+// HLC) are skipped; a unit where every member was skipped is rejected_stale
+// (§2.4).
 func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) syncResult {
 	tx, err := h.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -231,10 +240,14 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) 
 	}
 	defer tx.Rollback()
 
+	skipped := 0
 	for _, m := range u.mutations {
 		err := applyMutation(ctx, tx, m, now)
 		switch {
 		case err == nil:
+			continue
+		case errors.Is(err, errAlreadyApplied):
+			skipped++
 			continue
 		case errors.Is(err, errRejectedStale):
 			return syncResult{Table: u.table, ID: u.id, Status: "rejected_stale"}
@@ -247,6 +260,10 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) 
 		}
 	}
 
+	if skipped == len(u.mutations) {
+		return syncResult{Table: u.table, ID: u.id, Status: "rejected_stale"}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "SYNC_MUTATION_INVALID", Message: err.Error()}}
 	}
@@ -255,8 +272,8 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) 
 }
 
 // applyMutation validates and applies one mutation's row within tx. A
-// returned error is one of: errRejectedStale (§2.3, becomes
-// "rejected_stale"), *clockSkewError (becomes "rejected_invalid" +
+// returned error is one of: errAlreadyApplied (§2.4, the member is skipped),
+// errRejectedStale (§2.3, becomes "rejected_stale"), *clockSkewError (becomes "rejected_invalid" +
 // CLOCK_SKEW_TOO_LARGE), or any other error meaning the row was
 // structurally invalid or referenced a row that doesn't exist (becomes
 // "rejected_invalid" + SYNC_MUTATION_INVALID) — never a raw SQL error
@@ -283,8 +300,9 @@ func applyMutation(ctx context.Context, tx *sql.Tx, m syncMutation, now time.Tim
 // checkIncomingHLC applies the two HLC-based safeguards (§2.3) that must run
 // before a mutation's row is otherwise validated or applied: reject an
 // incoming HLC whose physical component is too far ahead of the server's own
-// clock, and reject (as stale, not invalid) a mutation whose HLC does not
-// order strictly after the existing row's. A row that fails to parse its id
+// clock, and reject (as stale, not invalid) a mutation whose HLC orders
+// strictly before the existing row's — or report errAlreadyApplied when it's
+// exactly equal. A row that fails to parse its id
 // or HLC fields here is left for the table-specific apply*/validate step
 // below to report with its usual, more specific error message.
 func checkIncomingHLC(ctx context.Context, tx *sql.Tx, m syncMutation, now time.Time) error {
@@ -316,7 +334,10 @@ func checkIncomingHLC(ctx context.Context, tx *sql.Tx, m syncMutation, now time.
 
 	incoming := sync.HLC{Physical: *probe.HLCPhysical, Counter: *probe.HLCCounter, NodeID: probe.HLCNodeID}
 	existingHLC := sync.HLC{Physical: existing.Physical, Counter: existing.Counter, NodeID: existing.NodeID}
-	if sync.Compare(existingHLC, incoming) >= 0 {
+	switch c := sync.Compare(existingHLC, incoming); {
+	case c == 0:
+		return errAlreadyApplied
+	case c > 0:
 		return errRejectedStale
 	}
 	return nil
@@ -639,8 +660,14 @@ func applyUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, row json.RawMessage
 			return hlcErr
 		}
 		incoming := sync.HLC{Physical: *req.HLCPhysical, Counter: *req.HLCCounter, NodeID: req.HLCNodeID}
-		if found && sync.Compare(sync.HLC{Physical: existing.Physical, Counter: existing.Counter, NodeID: existing.NodeID}, incoming) >= 0 {
-			return errRejectedStale
+		if found {
+			switch c := sync.Compare(sync.HLC{Physical: existing.Physical, Counter: existing.Counter, NodeID: existing.NodeID}, incoming); {
+			case c == 0:
+				// This write was already merged onto the stored id (§2.4).
+				return errAlreadyApplied
+			case c > 0:
+				return errRejectedStale
+			}
 		}
 		err = upsert(keyTaken.ExistingID)
 	}

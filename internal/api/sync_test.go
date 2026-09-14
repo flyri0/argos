@@ -346,8 +346,9 @@ func TestSync_StaleMutationRejected(t *testing.T) {
 		]
 	}`)
 
-	// A second write with an HLC equal to (not just less than) the existing
-	// row's must also be rejected as stale (§2.3's "greater or equal" rule).
+	// A lone write with an HLC equal to the existing row's is skipped as
+	// already applied, and a unit whose every member was skipped is still
+	// reported rejected_stale (§2.4).
 	resp := postSync(t, h, `{
 		"since": 0,
 		"mutations": [
@@ -378,6 +379,142 @@ func TestSync_StaleMutationRejected(t *testing.T) {
 	}
 	if found == nil || found.Name != "Landlord" {
 		t.Fatalf("expected stale mutation to leave row unchanged, got %+v", found)
+	}
+}
+
+const (
+	transferLeg1 = "55555555-5555-5555-5555-555555555555"
+	transferLeg2 = "66666666-6666-6666-6666-666666666666"
+)
+
+// transferSyncSetup creates the two on-budget accounts the transfer group
+// tests below move money between.
+func transferSyncSetup(t *testing.T, h *SyncHandler) {
+	t.Helper()
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "accounts", "op": "upsert", "group_id": null, "row": {
+				"id": "11111111-1111-1111-1111-111111111111",
+				"name": "Checking", "type": "checking", "on_budget": true, "closed": false, "currency": "USD",
+				"hlc_physical": 500, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}},
+			{"table": "accounts", "op": "upsert", "group_id": null, "row": {
+				"id": "77777777-7777-7777-7777-777777777777",
+				"name": "Savings", "type": "savings", "on_budget": true, "closed": false, "currency": "USD",
+				"hlc_physical": 500, "hlc_counter": 1, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+}
+
+// transferLegMutation is one leg of a transfer as a /sync mutation; leg 1
+// lives in Checking, leg 2 in Savings.
+func transferLegMutation(groupID, legID string, amount, hlcPhysical int64) string {
+	account := "11111111-1111-1111-1111-111111111111"
+	if legID == transferLeg2 {
+		account = "77777777-7777-7777-7777-777777777777"
+	}
+	return fmt.Sprintf(`{"table": "transactions", "op": "upsert", "group_id": %q, "row": {
+		"id": %q, "account_id": %q, "transfer_id": "abababab-abab-abab-abab-abababababab",
+		"date": "2026-01-01", "amount": %d, "cleared": false, "notes": "",
+		"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+	}}`, groupID, legID, account, amount, hlcPhysical)
+}
+
+func syncBody(mutations ...string) string {
+	return `{"since": 0, "mutations": [` + strings.Join(mutations, ",") + `]}`
+}
+
+func transferLegState(t *testing.T, h *SyncHandler, legID string) (amount, hlcPhysical int64) {
+	t.Helper()
+	if err := h.DB.QueryRow(`SELECT amount, hlc_physical FROM transactions WHERE id = ?`, legID).Scan(&amount, &hlcPhysical); err != nil {
+		t.Fatalf("query leg %s: %v", legID, err)
+	}
+	return amount, hlcPhysical
+}
+
+func TestSync_GroupRetryWithIdenticalHLCIsStaleAndHarmless(t *testing.T) {
+	h := newTestSyncHandler(t)
+	transferSyncSetup(t, h)
+	const group = "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1"
+	body := syncBody(
+		transferLegMutation(group, transferLeg1, -1000, 1000),
+		transferLegMutation(group, transferLeg2, 1000, 1001),
+	)
+
+	if resp := postSync(t, h, body); len(resp.Results) != 1 || resp.Results[0].Status != "applied" {
+		t.Fatalf("expected first push applied, got %+v", resp.Results)
+	}
+	resp := postSync(t, h, body)
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected identical retry rejected_stale, got %+v", resp.Results)
+	}
+	if amount, hlc := transferLegState(t, h, transferLeg1); amount != -1000 || hlc != 1000 {
+		t.Fatalf("leg 1 changed: amount=%d hlc=%d", amount, hlc)
+	}
+	if amount, hlc := transferLegState(t, h, transferLeg2); amount != 1000 || hlc != 1001 {
+		t.Fatalf("leg 2 changed: amount=%d hlc=%d", amount, hlc)
+	}
+}
+
+func TestSync_GroupWithAlreadyAppliedAndNewerMembersApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	transferSyncSetup(t, h)
+	const createGroup = "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1"
+	const retryGroup = "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2"
+
+	postSync(t, h, syncBody(
+		transferLegMutation(createGroup, transferLeg1, -1000, 1000),
+		transferLegMutation(createGroup, transferLeg2, 1000, 2000),
+	))
+
+	// A lost response left the create unsynced, and a later edit merged
+	// into the same unit: the create members are already applied and must
+	// not discard the edit.
+	resp := postSync(t, h, syncBody(
+		transferLegMutation(retryGroup, transferLeg1, -1000, 1000),
+		transferLegMutation(retryGroup, transferLeg2, 1000, 2000),
+		transferLegMutation(retryGroup, transferLeg1, -2500, 5000),
+		transferLegMutation(retryGroup, transferLeg2, 2500, 6000),
+	))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "applied" {
+		t.Fatalf("expected applied, got %+v", resp.Results)
+	}
+	if amount, hlc := transferLegState(t, h, transferLeg1); amount != -2500 || hlc != 5000 {
+		t.Fatalf("expected leg 1 at the h5 edit, got amount=%d hlc=%d", amount, hlc)
+	}
+	if amount, hlc := transferLegState(t, h, transferLeg2); amount != 2500 || hlc != 6000 {
+		t.Fatalf("expected leg 2 at the h6 edit, got amount=%d hlc=%d", amount, hlc)
+	}
+}
+
+func TestSync_GroupWithStrictlyOlderMemberIsStale(t *testing.T) {
+	h := newTestSyncHandler(t)
+	transferSyncSetup(t, h)
+	const createGroup = "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1"
+	const editGroup = "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2"
+
+	postSync(t, h, syncBody(
+		transferLegMutation(createGroup, transferLeg1, -1000, 2000),
+		transferLegMutation(createGroup, transferLeg2, 1000, 2000),
+	))
+
+	resp := postSync(t, h, syncBody(
+		transferLegMutation(editGroup, transferLeg1, -3000, 1000), // strictly older
+		transferLegMutation(editGroup, transferLeg2, 3000, 3000),  // newer
+	))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected rejected_stale, got %+v", resp.Results)
+	}
+	if resp.Results[0].Error != nil {
+		t.Fatalf("rejected_stale must not carry an error object (§2.4), got %+v", resp.Results[0].Error)
+	}
+	if amount, hlc := transferLegState(t, h, transferLeg2); amount != 1000 || hlc != 2000 {
+		t.Fatalf("expected leg 2 untouched by the rejected unit, got amount=%d hlc=%d", amount, hlc)
 	}
 }
 

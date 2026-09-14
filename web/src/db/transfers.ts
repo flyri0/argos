@@ -25,6 +25,7 @@ export interface NewTransferInput {
 // Dexie replica rather than through the HTTP API.
 export async function createTransfer(input: NewTransferInput): Promise<void> {
   const transferId = generateUUID();
+  const groupId = generateUUID();
 
   await db.transaction("rw", db.transactions, db.outbox, async () => {
     const primary: Transaction = {
@@ -57,10 +58,12 @@ export async function createTransfer(input: NewTransferInput): Promise<void> {
     };
     await db.transactions.add(primary);
     await db.transactions.add(mirror);
-    // Both legs share `transferId` as the outbox group_id (§2.4) so the
-    // server commits or rejects them atomically, never just one side.
-    await enqueueRowMutation("transactions", primary, transferId);
-    await enqueueRowMutation("transactions", mirror, transferId);
+    // Both legs share one outbox group_id (§2.4) so the server commits or
+    // rejects them atomically, never just one side. It's fresh per
+    // operation, never the transfer_id: a later edit of this transfer must
+    // not merge into the same unit as this create.
+    await enqueueRowMutation("transactions", primary, groupId);
+    await enqueueRowMutation("transactions", mirror, groupId);
   });
 }
 
@@ -85,7 +88,9 @@ export async function updateTransfer(
   await db.transaction("rw", db.transactions, db.outbox, async () => {
     const transaction = await db.transactions.get(transactionId);
     if (!transaction || transaction.transfer_id === null) return;
-    const groupId = transaction.transfer_id;
+    // Fresh per operation (§2.4), so this edit can't merge into a unit with
+    // an earlier, still-unsynced operation on the same transfer.
+    const groupId = generateUUID();
 
     await db.transactions.update(transactionId, {
       date: changes.date,
@@ -126,10 +131,11 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
   await db.transaction("rw", db.transactions, db.outbox, async () => {
     const transaction = await db.transactions.get(transactionId);
     if (!transaction) return;
-    // null for a standalone transaction (a lone mutation, per §2.4); the
-    // shared transfer_id for a transfer leg, so both sides of the delete
-    // commit atomically together.
-    const groupId = transaction.transfer_id;
+    // null for a standalone transaction (a lone mutation, per §2.4); for a
+    // transfer leg, a fresh per-operation id so both sides of the delete
+    // commit atomically together without merging into another operation's
+    // unit.
+    const groupId = transaction.transfer_id === null ? null : generateUUID();
 
     await db.transactions.update(transactionId, {
       deleted_at: Date.now(),

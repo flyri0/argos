@@ -87,7 +87,7 @@ describe("createTransfer", () => {
     expect(primary?.transfer_id).not.toBe("t2");
   });
 
-  it("enqueues both legs as one outbox group sharing the transfer_id (§2.4)", async () => {
+  it("enqueues both legs as one outbox group with a fresh group id, not the transfer_id (§2.4)", async () => {
     await createTransfer({
       id: "t1",
       transferTransactionId: "t2",
@@ -102,8 +102,35 @@ describe("createTransfer", () => {
     const primary = await transactions.get("t1");
     const entries = await outbox.listUnsynced();
     expect(entries).toHaveLength(2);
-    expect(entries.every((e) => e.group_id === primary?.transfer_id)).toBe(true);
+    const groupId = entries[0].group_id;
+    expect(groupId).not.toBeNull();
+    expect(groupId).not.toBe(primary?.transfer_id);
+    expect(["t1", "t2"]).not.toContain(groupId);
+    expect(entries.every((e) => e.group_id === groupId)).toBe(true);
     expect(entries.map((e) => e.row.id).sort()).toEqual(["t1", "t2"]);
+  });
+
+  it("gives a later operation on the same transfer a different group id", async () => {
+    await createTransfer({
+      id: "t1",
+      transferTransactionId: "t2",
+      accountId: "acc-checking",
+      transferAccountId: "acc-savings",
+      payeeId: null,
+      date: "2026-03-05",
+      amountMinor: -1000,
+      notes: "",
+    });
+    const createGroup = (await outbox.listUnsynced())[0].group_id;
+
+    await updateTransfer("t1", { date: "2026-03-06", payeeId: null, notes: "", amountMinor: -2000 });
+
+    const updateEntries = (await outbox.listUnsynced()).filter((e) => e.group_id !== createGroup);
+    expect(updateEntries).toHaveLength(2);
+    const updateGroup = updateEntries[0].group_id;
+    expect(updateGroup).not.toBeNull();
+    expect(updateGroup).not.toBe((await transactions.get("t1"))?.transfer_id);
+    expect(updateEntries.every((e) => e.group_id === updateGroup)).toBe(true);
   });
 });
 
@@ -207,7 +234,7 @@ describe("deleteTransaction", () => {
     expect((await transactions.get("t2"))?.deleted_at).not.toBeNull();
   });
 
-  it("enqueues both legs' deletes under one outbox group, keyed by transfer_id", async () => {
+  it("enqueues both legs' deletes under one fresh outbox group, distinct from the transfer_id and the create's group", async () => {
     await createTransfer({
       id: "t1",
       transferTransactionId: "t2",
@@ -219,12 +246,17 @@ describe("deleteTransaction", () => {
       notes: "",
     });
     const transferId = (await transactions.get("t1"))?.transfer_id;
+    const createGroup = (await outbox.listUnsynced())[0].group_id;
 
     await deleteTransaction("t2");
 
     const deletes = (await outbox.listUnsynced()).filter((e) => e.op === "delete");
     expect(deletes).toHaveLength(2);
-    expect(deletes.every((e) => e.group_id === transferId)).toBe(true);
+    const deleteGroup = deletes[0].group_id;
+    expect(deleteGroup).not.toBeNull();
+    expect(deleteGroup).not.toBe(transferId);
+    expect(deleteGroup).not.toBe(createGroup);
+    expect(deletes.every((e) => e.group_id === deleteGroup)).toBe(true);
   });
 
   it("enqueues a \"delete\" op with a null group_id for a standalone (non-transfer) delete", async () => {
