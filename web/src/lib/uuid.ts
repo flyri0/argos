@@ -1,3 +1,5 @@
+import { v5 } from "uuid";
+
 // crypto.randomUUID() is restricted to secure contexts (HTTPS, or the
 // browser's own localhost/127.0.0.1 exception) — it throws in any other
 // context, including exactly the plain-HTTP LAN address (e.g.
@@ -17,4 +19,14 @@ export function generateUUID(): string {
 
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const BUDGET_ENTRY_NAMESPACE = "3b8f5c2a-6d1e-4f7a-9c4b-8e2d1a7f6b30";
+
+// §5.2: a brand-new (category_id, month) pair gets a deterministic id, so
+// two devices budgeting the same pair offline converge on one row. Uses the
+// uuid package's pure-JS SHA-1 because crypto.subtle, like randomUUID, is
+// unavailable over plain-HTTP LAN. Must match internal/db.BudgetEntryID.
+export function budgetEntryId(categoryId: string, month: string): string {
+  return v5(`${categoryId}:${month}`, BUDGET_ENTRY_NAMESPACE);
 }

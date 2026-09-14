@@ -352,37 +352,41 @@ func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *st
 			}
 		}
 
+		// §5.4: merge each month into the target's row for that month and
+		// soft-delete the source row. Re-pointing the source row would change
+		// its (category_id, month) identity (§5.2) and collide with a target
+		// tombstone under the UNIQUE constraint.
 		for _, e := range entries {
-			var targetEntryID string
-			var targetBudgeted int64
-			err := tx.QueryRowContext(ctx, `SELECT id, budgeted FROM budget_entries WHERE category_id = ? AND month = ? AND deleted_at IS NULL`, *reassignTo, e.Month).
-				Scan(&targetEntryID, &targetBudgeted)
+			target, err := getBudgetEntryForPairTx(ctx, tx, *reassignTo, e.Month)
 			switch {
-			case errors.Is(err, sql.ErrNoRows):
+			case errors.Is(err, ErrNotFound):
 				if _, err := tx.ExecContext(ctx, `
-					UPDATE budget_entries
-					SET category_id = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
-					WHERE id = ?`,
-					*reassignTo, hlcPhysical, hlcCounter, hlcNodeID, version, e.ID); err != nil {
+					INSERT INTO budget_entries (id, category_id, month, budgeted, hlc_physical, hlc_counter, hlc_node_id, server_version, deleted_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+					BudgetEntryID(*reassignTo, e.Month), *reassignTo, e.Month, e.Budgeted, hlcPhysical, hlcCounter, hlcNodeID, version); err != nil {
 					return Category{}, err
 				}
 			case err != nil:
 				return Category{}, err
 			default:
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE budget_entries
-					SET budgeted = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
-					WHERE id = ?`,
-					targetBudgeted+e.Budgeted, hlcPhysical, hlcCounter, hlcNodeID, version, targetEntryID); err != nil {
-					return Category{}, err
+				merged := e.Budgeted
+				if !target.DeletedAt.Valid {
+					merged += target.Budgeted
 				}
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE budget_entries
-					SET deleted_at = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
+					SET budgeted = ?, deleted_at = NULL, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
 					WHERE id = ?`,
-					hlcPhysical, hlcPhysical, hlcCounter, hlcNodeID, version, e.ID); err != nil {
+					merged, hlcPhysical, hlcCounter, hlcNodeID, version, target.ID); err != nil {
 					return Category{}, err
 				}
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE budget_entries
+				SET deleted_at = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
+				WHERE id = ?`,
+				hlcPhysical, hlcPhysical, hlcCounter, hlcNodeID, version, e.ID); err != nil {
+				return Category{}, err
 			}
 		}
 	}

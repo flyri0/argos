@@ -116,6 +116,7 @@ This is the exact, binding shape of the `/sync` exchange — implementations mus
 - `sync_id` / `schema_version`: copied from `server_meta` (§5.2) on every response, so the client can detect a reset or a schema mismatch on every sync, not just at startup.
 - `results`: exactly one entry per submitted mutation (or one per group, for grouped mutations — reported once under the group's first member), `status` one of `"applied"`, `"rejected_stale"` (an existing row had a greater-or-equal HLC — expected behavior, not an error, §2.3), or `"rejected_invalid"` (accompanied by an `error` object shaped per §7.2).
 - `changes`: every row, across all syncable tables, with `server_version` greater than the request's `since` — this is the pull half of the same round-trip.
+- When a client applies a pulled `budget_entries` row, any other local row with the same `(category_id, month)` and a different id is soft-deleted locally, without an outbox entry — the server has already resolved both ids onto the pulled row (§5.2).
 
 ## 3. Binary lifecycle & system integration
 
@@ -263,6 +264,18 @@ budget_entries
                                  -- "does any row exist" as its in-use signal, and a zero row left
                                  -- lingering forever would make that signal meaningless.
                                  -- category_id must not belong to the income group (§5.3).
+                                 -- (category_id, month) is the logical identity of a budget
+                                 -- entry; the UNIQUE constraint covers tombstones too. A
+                                 -- brand-new pair's id is UUIDv5(namespace
+                                 -- 3b8f5c2a-6d1e-4f7a-9c4b-8e2d1a7f6b30, "<category_id>:<month>"),
+                                 -- so two devices budgeting the same pair offline mint the same
+                                 -- id. Clients reuse any existing row for the pair (live or
+                                 -- tombstone) instead of minting an id; setting a non-zero amount
+                                 -- on a tombstoned pair revives it (deleted_at cleared). On the
+                                 -- server, an upsert whose id differs from the stored row for the
+                                 -- same pair is resolved by HLC last-write-wins onto the stored
+                                 -- row's id — applied if strictly newer, rejected_stale otherwise
+                                 -- — never rejected_invalid.
 
 server_meta                     -- single row, not synced to clients as a normal record
   sync_id        uuid           -- generated once, on first run. Changes only on an explicit reset
@@ -303,7 +316,7 @@ The exact rollover and overspending rules are the most important — and most er
 
 Mirrors Actual Budget's own behavior, since it's a well-tested UX for this exact problem: a category or payee can be deleted outright only if it has never been used (no transactions reference it, and — for categories — it holds no leftover balance). If it *has* been used, the delete request must include a `reassign_to` target (another category or payee id); the server moves every referencing transaction, and any leftover category balance, to the target *in the same transaction* before soft-deleting the source. This means a deleted category/payee never leaves a dangling reference behind — historical transactions always point at a category/payee that still exists.
 
-**Defining "leftover balance" without the rollover engine**: the true `available` figure (§5.3) depends on the budgeting engine, which is its own carefully-tested module — using it as the gate for a data-loss-preventing check would tie category deletion to a piece of logic that may not exist yet, or that could itself have a bug at exactly the wrong moment. Instead, a category counts as having a leftover balance if it has **any row at all in `budget_entries`**, for any month, regardless of the amount. This is deliberately coarse: it will occasionally require a reassignment for a category whose true available is actually zero (a harmless extra click), but it can never do the opposite — skip reassignment for a category that still carries a positive rollover from an earlier month where nothing was budgeted this month. Losing money silently is the one failure mode this check must never have; asking for an unnecessary reassignment is an acceptable cost for that guarantee. On reassignment, every `budget_entries` row for the source category moves to `reassign_to`: if the target already has a row for that month, sum the `budgeted` amounts into it and remove the source row; otherwise, simply re-point the source row to the target category. See §5.2's note on `budget_entries` for the companion rule that keeps zero-value rows from accumulating and making this signal meaningless over time.
+**Defining "leftover balance" without the rollover engine**: the true `available` figure (§5.3) depends on the budgeting engine, which is its own carefully-tested module — using it as the gate for a data-loss-preventing check would tie category deletion to a piece of logic that may not exist yet, or that could itself have a bug at exactly the wrong moment. Instead, a category counts as having a leftover balance if it has **any row at all in `budget_entries`**, for any month, regardless of the amount. This is deliberately coarse: it will occasionally require a reassignment for a category whose true available is actually zero (a harmless extra click), but it can never do the opposite — skip reassignment for a category that still carries a positive rollover from an earlier month where nothing was budgeted this month. Losing money silently is the one failure mode this check must never have; asking for an unnecessary reassignment is an acceptable cost for that guarantee. On reassignment, for each month the source category has a live `budget_entries` row, its amount is added to the target's row for that month — reviving the target's tombstone for that month if it only has one, or creating the target row with its UUIDv5 id (§5.2) if it has none — and the source row is soft-deleted. Source rows are never re-pointed to the target, since that would change a row's (category_id, month) identity (§5.2). See §5.2's note on `budget_entries` for the companion rule that keeps zero-value rows from accumulating and making this signal meaningless over time.
 
 ## 6. Authentication & device pairing
 

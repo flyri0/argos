@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 // BudgetEntry is a budget_entries row (§5.2) plus its sync metadata (§5.1).
@@ -95,8 +97,20 @@ func rejectIncomeCategoryTx(ctx context.Context, tx *sql.Tx, categoryID string) 
 	return nil
 }
 
-func getBudgetEntryTx(ctx context.Context, tx *sql.Tx, categoryID, month string) (BudgetEntry, error) {
-	row := tx.QueryRowContext(ctx, `SELECT `+budgetEntryColumns+` FROM budget_entries WHERE category_id = ? AND month = ? AND deleted_at IS NULL`, categoryID, month)
+// budgetEntryNamespace is §5.2's UUIDv5 namespace for budget entry ids.
+var budgetEntryNamespace = uuid.MustParse("3b8f5c2a-6d1e-4f7a-9c4b-8e2d1a7f6b30")
+
+// BudgetEntryID returns the deterministic id of a brand-new (categoryID,
+// month) pair (§5.2). Must match web/src/lib/uuid.ts budgetEntryId.
+func BudgetEntryID(categoryID, month string) string {
+	return uuid.NewSHA1(budgetEntryNamespace, []byte(categoryID+":"+month)).String()
+}
+
+// getBudgetEntryForPairTx returns the row stored for (categoryID, month),
+// live or tombstoned — the UNIQUE constraint covers both, so there is at
+// most one — or ErrNotFound.
+func getBudgetEntryForPairTx(ctx context.Context, tx *sql.Tx, categoryID, month string) (BudgetEntry, error) {
+	row := tx.QueryRowContext(ctx, `SELECT `+budgetEntryColumns+` FROM budget_entries WHERE category_id = ? AND month = ?`, categoryID, month)
 	e, err := scanBudgetEntry(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BudgetEntry{}, ErrNotFound
@@ -130,8 +144,25 @@ func SetBudgetedAmount(ctx context.Context, conn *sql.DB, id, categoryID, month 
 		return err
 	}
 
-	existing, err := getBudgetEntryTx(ctx, tx, categoryID, month)
+	existing, err := getBudgetEntryForPairTx(ctx, tx, categoryID, month)
 	switch {
+	case err == nil && existing.DeletedAt.Valid:
+		// A tombstone still owns the pair under the UNIQUE constraint, so
+		// re-budgeting revives it rather than inserting a second row.
+		if budgeted == 0 {
+			return tx.Commit()
+		}
+		version, err := nextServerVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE budget_entries
+			SET budgeted = ?, deleted_at = NULL, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
+			WHERE id = ?`,
+			budgeted, hlcPhysical, hlcCounter, hlcNodeID, version, existing.ID); err != nil {
+			return err
+		}
 	case errors.Is(err, ErrNotFound):
 		if budgeted == 0 {
 			return tx.Commit()

@@ -1,4 +1,5 @@
-import { generateUUID } from "../lib/uuid";
+import { budgetEntryId, generateUUID } from "../lib/uuid";
+import { findBudgetEntryForPair } from "./budget";
 import { db } from "./db";
 import { enqueueRowMutation } from "./helpers";
 import { nextHlc } from "./hlc";
@@ -38,8 +39,8 @@ export function isPayeeInUse(
 }
 
 // §5.4: moves every transaction referencing `sourceId` onto `targetId`,
-// merges budget_entries that collide on month (summing `budgeted`) and
-// re-points the rest, then soft-deletes the source category. Wrapped in a
+// merges each month's budget_entries amount into the target's row for that
+// month, then soft-deletes the source category. Wrapped in a
 // Dexie transaction so a mid-way failure can't leave transactions pointing
 // at one category while its budget_entries move to another — matching
 // §5.4's own framing that losing track of money is the one failure mode
@@ -74,36 +75,42 @@ export async function reassignCategory(
         if (updated) await enqueueRowMutation("transactions", updated, groupId);
       }
 
+      // §5.4: never re-point a source row — that would change its
+      // (category_id, month) identity (§5.2). Merge into the target's row
+      // for the month instead, then soft-delete the source.
       for (const entry of sourceBudgetEntries) {
         if (entry.deleted_at !== null) continue;
 
-        const targetEntry = await db.budget_entries
-          .where("[category_id+month]")
-          .equals([targetId, entry.month])
-          .first();
-
-        if (targetEntry && targetEntry.deleted_at === null) {
-          await db.budget_entries.update(targetEntry.id, {
-            budgeted: targetEntry.budgeted + entry.budgeted,
-            ...nextHlc(),
-          });
-          const updatedTarget = await db.budget_entries.get(targetEntry.id);
-          if (updatedTarget) await enqueueRowMutation("budget_entries", updatedTarget, groupId);
-
-          await db.budget_entries.update(entry.id, {
-            deleted_at: Date.now(),
-            ...nextHlc(),
-          });
-          const updatedSource = await db.budget_entries.get(entry.id);
-          if (updatedSource) await enqueueRowMutation("budget_entries", updatedSource, groupId);
-        } else {
-          await db.budget_entries.update(entry.id, {
+        const targetEntry = await findBudgetEntryForPair(targetId, entry.month);
+        let targetRowId: string;
+        if (!targetEntry) {
+          targetRowId = budgetEntryId(targetId, entry.month);
+          await db.budget_entries.add({
+            id: targetRowId,
             category_id: targetId,
+            month: entry.month,
+            budgeted: entry.budgeted,
+            deleted_at: null,
             ...nextHlc(),
           });
-          const updated = await db.budget_entries.get(entry.id);
-          if (updated) await enqueueRowMutation("budget_entries", updated, groupId);
+        } else {
+          targetRowId = targetEntry.id;
+          const base = targetEntry.deleted_at === null ? targetEntry.budgeted : 0;
+          await db.budget_entries.update(targetEntry.id, {
+            budgeted: base + entry.budgeted,
+            deleted_at: null,
+            ...nextHlc(),
+          });
         }
+        const updatedTarget = await db.budget_entries.get(targetRowId);
+        if (updatedTarget) await enqueueRowMutation("budget_entries", updatedTarget, groupId);
+
+        await db.budget_entries.update(entry.id, {
+          deleted_at: Date.now(),
+          ...nextHlc(),
+        });
+        const updatedSource = await db.budget_entries.get(entry.id);
+        if (updatedSource) await enqueueRowMutation("budget_entries", updatedSource, groupId);
       }
 
       await db.categories.update(sourceId, {

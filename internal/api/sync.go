@@ -621,17 +621,34 @@ func applyUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, row json.RawMessage
 		return err
 	}
 
-	err := db.SyncUpsertBudgetEntry(ctx, tx, db.SyncBudgetEntry{
-		ID: req.ID, CategoryID: req.CategoryID, Month: req.Month, Budgeted: *req.Budgeted,
-		HLCPhysical: *req.HLCPhysical, HLCCounter: *req.HLCCounter, HLCNodeID: req.HLCNodeID,
-	})
+	upsert := func(id string) error {
+		return db.SyncUpsertBudgetEntry(ctx, tx, db.SyncBudgetEntry{
+			ID: id, CategoryID: req.CategoryID, Month: req.Month, Budgeted: *req.Budgeted,
+			HLCPhysical: *req.HLCPhysical, HLCCounter: *req.HLCCounter, HLCNodeID: req.HLCNodeID,
+		})
+	}
+
+	err := upsert(req.ID)
+	var keyTaken *db.BudgetEntryKeyTakenError
+	if errors.As(err, &keyTaken) {
+		// §5.2: (category_id, month) is the entry's identity, so another id
+		// for the same pair is the same logical row — last-write-wins onto
+		// the stored id instead of a permanent rejection.
+		existing, found, hlcErr := db.GetRowHLCTx(ctx, tx, "budget_entries", keyTaken.ExistingID)
+		if hlcErr != nil {
+			return hlcErr
+		}
+		incoming := sync.HLC{Physical: *req.HLCPhysical, Counter: *req.HLCCounter, NodeID: req.HLCNodeID}
+		if found && sync.Compare(sync.HLC{Physical: existing.Physical, Counter: existing.Counter, NodeID: existing.NodeID}, incoming) >= 0 {
+			return errRejectedStale
+		}
+		err = upsert(keyTaken.ExistingID)
+	}
 	switch {
 	case errors.Is(err, db.ErrCategoryNotFound):
 		return errors.New("category_id does not reference an existing category")
 	case errors.Is(err, db.ErrIncomeCategoryNotBudgetable):
 		return errors.New("category_id belongs to the income group, which cannot be budgeted")
-	case errors.Is(err, db.ErrBudgetEntryConflict):
-		return errors.New("a budget entry for this category and month already exists under a different id")
 	default:
 		return err
 	}

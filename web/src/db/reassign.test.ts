@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { budgetEntryId } from "../lib/uuid";
 import { budgetEntries, categories, outbox, payees, transactions } from "./helpers";
 import { db } from "./db";
 import { isCategoryInUse, isPayeeInUse, reassignCategory, reassignPayee } from "./reassign";
@@ -174,7 +175,7 @@ describe("reassignCategory", () => {
     expect(removedSource?.deleted_at).not.toBeNull();
   });
 
-  it("re-points the source row when the target has no row for that month", async () => {
+  it("creates the target's UUIDv5 row and deletes the source when the target has no row for that month", async () => {
     const source = makeCategory({ name: "Old" });
     const target = makeCategory({ name: "New" });
     await categories.create(source);
@@ -189,10 +190,39 @@ describe("reassignCategory", () => {
 
     await reassignCategory(source.id, target.id);
 
-    const moved = await budgetEntries.get(sourceEntry.id);
-    expect(moved?.category_id).toBe(target.id);
-    expect(moved?.budgeted).toBe(1500);
-    expect(moved?.deleted_at).toBeNull();
+    const source_ = await budgetEntries.get(sourceEntry.id);
+    expect(source_?.category_id).toBe(source.id);
+    expect(source_?.deleted_at).not.toBeNull();
+
+    const created = await budgetEntries.get(budgetEntryId(target.id, "2026-04"));
+    expect(created).toMatchObject({ category_id: target.id, month: "2026-04", budgeted: 1500, deleted_at: null });
+  });
+
+  it("revives the target's tombstone for the month with the source amount", async () => {
+    const source = makeCategory({ name: "Old" });
+    const target = makeCategory({ name: "New" });
+    await categories.create(source);
+    await categories.create(target);
+
+    const sourceEntry = makeBudgetEntry({ category_id: source.id, month: "2026-05", budgeted: 1200 });
+    const targetTombstone = makeBudgetEntry({
+      category_id: target.id,
+      month: "2026-05",
+      budgeted: 9999,
+      deleted_at: Date.now(),
+    });
+    await budgetEntries.create(sourceEntry);
+    await budgetEntries.create(targetTombstone);
+
+    await reassignCategory(source.id, target.id);
+
+    const revived = await budgetEntries.get(targetTombstone.id);
+    expect(revived).toMatchObject({ budgeted: 1200, deleted_at: null });
+    expect((await budgetEntries.get(sourceEntry.id))?.deleted_at).not.toBeNull();
+    const targetRows = (await budgetEntries.list()).filter(
+      (e) => e.category_id === target.id && e.month === "2026-05",
+    );
+    expect(targetRows).toHaveLength(1);
   });
 
   it("handles multiple months independently", async () => {

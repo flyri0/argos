@@ -47,6 +47,118 @@ func postSync(t *testing.T, h *SyncHandler, body string) syncResponse {
 	return resp
 }
 
+// budgetEntrySyncSetup creates the group and category the budget_entries
+// identity tests below budget against.
+func budgetEntrySyncSetup(t *testing.T, h *SyncHandler) {
+	t.Helper()
+	postSync(t, h, `{
+		"since": 0,
+		"mutations": [
+			{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+				"id": "33333333-3333-3333-3333-333333333333", "name": "Bills", "is_income": false, "sort_order": 0,
+				"hlc_physical": 500, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}},
+			{"table": "categories", "op": "upsert", "group_id": null, "row": {
+				"id": "44444444-4444-4444-4444-444444444444", "group_id": "33333333-3333-3333-3333-333333333333",
+				"name": "Groceries", "hidden": false, "sort_order": 0,
+				"hlc_physical": 500, "hlc_counter": 1, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+			}}
+		]
+	}`)
+}
+
+func budgetEntryUpsertBody(id string, budgeted, hlcPhysical int64) string {
+	return fmt.Sprintf(`{"since": 0, "mutations": [
+		{"table": "budget_entries", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "category_id": "44444444-4444-4444-4444-444444444444", "month": "2026-03", "budgeted": %d,
+			"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+		}}
+	]}`, id, budgeted, hlcPhysical)
+}
+
+type storedBudgetEntry struct {
+	ID        string
+	Budgeted  int64
+	DeletedAt *int64
+}
+
+func budgetEntriesForPair(t *testing.T, h *SyncHandler) []storedBudgetEntry {
+	t.Helper()
+	rows, err := h.DB.Query(`SELECT id, budgeted, deleted_at FROM budget_entries
+		WHERE category_id = '44444444-4444-4444-4444-444444444444' AND month = '2026-03'`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var out []storedBudgetEntry
+	for rows.Next() {
+		var e storedBudgetEntry
+		if err := rows.Scan(&e.ID, &e.Budgeted, &e.DeletedAt); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func TestSync_BudgetEntryRevivedAfterDelete(t *testing.T) {
+	h := newTestSyncHandler(t)
+	budgetEntrySyncSetup(t, h)
+	const r1 = "55555555-5555-5555-5555-555555555555"
+
+	postSync(t, h, budgetEntryUpsertBody(r1, 100, 1000))
+	postSync(t, h, fmt.Sprintf(`{"since": 0, "mutations": [
+		{"table": "budget_entries", "op": "delete", "group_id": null, "row": {
+			"id": %q, "deleted_at": 1500, "hlc_physical": 1500, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+		}}
+	]}`, r1))
+	resp := postSync(t, h, budgetEntryUpsertBody(r1, 50, 2000))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "applied" {
+		t.Fatalf("expected applied, got %+v", resp.Results)
+	}
+	got := budgetEntriesForPair(t, h)
+	if len(got) != 1 || got[0].ID != r1 || got[0].Budgeted != 50 || got[0].DeletedAt != nil {
+		t.Fatalf("expected one revived row %s budgeted 50, got %+v", r1, got)
+	}
+}
+
+func TestSync_BudgetEntrySameKeyDifferentID_NewerWins(t *testing.T) {
+	h := newTestSyncHandler(t)
+	budgetEntrySyncSetup(t, h)
+	const r1 = "55555555-5555-5555-5555-555555555555"
+	const r2 = "66666666-6666-6666-6666-666666666666"
+
+	postSync(t, h, budgetEntryUpsertBody(r1, 100, 1000))
+	resp := postSync(t, h, budgetEntryUpsertBody(r2, 70, 2000))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "applied" {
+		t.Fatalf("expected applied, got %+v", resp.Results)
+	}
+	got := budgetEntriesForPair(t, h)
+	if len(got) != 1 || got[0].ID != r1 || got[0].Budgeted != 70 {
+		t.Fatalf("expected the newer write applied onto %s with no %s row, got %+v", r1, r2, got)
+	}
+}
+
+func TestSync_BudgetEntrySameKeyDifferentID_OlderIsStale(t *testing.T) {
+	h := newTestSyncHandler(t)
+	budgetEntrySyncSetup(t, h)
+	const r1 = "55555555-5555-5555-5555-555555555555"
+	const r2 = "66666666-6666-6666-6666-666666666666"
+
+	postSync(t, h, budgetEntryUpsertBody(r1, 100, 2000))
+	resp := postSync(t, h, budgetEntryUpsertBody(r2, 70, 1000))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected rejected_stale, got %+v", resp.Results)
+	}
+	got := budgetEntriesForPair(t, h)
+	if len(got) != 1 || got[0].ID != r1 || got[0].Budgeted != 100 {
+		t.Fatalf("expected %s untouched, got %+v", r1, got)
+	}
+}
+
 func TestSync_UpsertAccountThenPullsItBack(t *testing.T) {
 	h := newTestSyncHandler(t)
 

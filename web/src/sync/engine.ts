@@ -101,9 +101,22 @@ async function applyChange(change: SyncChangeWire): Promise<void> {
     case "transactions":
       await db.transactions.put(change.row as Transaction);
       return;
-    case "budget_entries":
-      await db.budget_entries.put(change.row as BudgetEntry);
+    case "budget_entries": {
+      const row = change.row as BudgetEntry;
+      await db.budget_entries.put(row);
+      // §2.4/§5.2: the server resolved any other id for this pair onto the
+      // pulled row, so a local duplicate is now redundant. Deleted locally
+      // only — the server already has the outcome.
+      const duplicates = await db.budget_entries
+        .where("[category_id+month]")
+        .equals([row.category_id, row.month])
+        .filter((other) => other.id !== row.id && other.deleted_at === null)
+        .toArray();
+      for (const duplicate of duplicates) {
+        await db.budget_entries.update(duplicate.id, { deleted_at: Date.now() });
+      }
       return;
+    }
   }
 }
 

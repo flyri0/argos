@@ -10,12 +10,17 @@ import (
 // (reserved for V1 splits, §5.2) names a transaction that doesn't exist.
 var ErrParentTransactionNotFound = errors.New("parent transaction not found")
 
-// ErrBudgetEntryConflict is returned when a budget_entries upsert's
-// (category_id, month) pair already belongs to a different row (§5.2's
-// unique constraint) — the incoming id can't be reconciled with the
-// existing one without dropping data, so the mutation is rejected rather
-// than silently overwriting it.
-var ErrBudgetEntryConflict = errors.New("a budget entry for this category and month already exists under a different id")
+// BudgetEntryKeyTakenError is returned when a budget_entries upsert's
+// (category_id, month) pair is already stored — live or tombstoned — under
+// a different id. The pair is the entry's identity (§5.2), so the caller
+// resolves this by last-write-wins onto ExistingID rather than rejecting.
+type BudgetEntryKeyTakenError struct {
+	ExistingID string
+}
+
+func (e *BudgetEntryKeyTakenError) Error() string {
+	return "a budget entry for this category and month is stored under id " + e.ExistingID
+}
 
 // syncTables lists the tables /sync (§2.4) can mutate — every table in §5.2
 // that carries the sync metadata columns (§5.1). server_meta and devices
@@ -373,8 +378,8 @@ type SyncBudgetEntry struct {
 // SyncUpsertBudgetEntry inserts or fully replaces the budget_entries row
 // identified by in.ID, assigning it a fresh server_version. Returns
 // ErrCategoryNotFound if in.CategoryID doesn't name an existing category, or
-// ErrBudgetEntryConflict if (category_id, month) already belongs to a
-// different row (§5.2's unique constraint).
+// *BudgetEntryKeyTakenError if (category_id, month) is already stored under a
+// different id, tombstones included (§5.2's unique constraint).
 func SyncUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, in SyncBudgetEntry) error {
 	exists, err := checkRowExistsTx(ctx, tx, "categories", in.CategoryID)
 	if err != nil {
@@ -387,13 +392,12 @@ func SyncUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, in SyncBudgetEntry) 
 		return err
 	}
 
-	var conflictingID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM budget_entries WHERE category_id = ? AND month = ? AND id != ?`, in.CategoryID, in.Month, in.ID).Scan(&conflictingID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	existing, err := getBudgetEntryForPairTx(ctx, tx, in.CategoryID, in.Month)
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	if err == nil {
-		return ErrBudgetEntryConflict
+	if err == nil && existing.ID != in.ID {
+		return &BudgetEntryKeyTakenError{ExistingID: existing.ID}
 	}
 
 	version, err := nextServerVersion(ctx, tx)

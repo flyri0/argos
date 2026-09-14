@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDeviceToken, setDeviceToken } from "../auth";
 import { db } from "../db/db";
 import { outbox } from "../db/helpers";
-import type { Account } from "../db/types";
+import type { Account, BudgetEntry } from "../db/types";
 import { getCursor, getSyncId } from "./cursor";
 import { runSync } from "./engine";
 import { getSyncStatus } from "./status";
@@ -230,6 +230,29 @@ describe("runSync", () => {
     await runSync();
 
     expect(await db.accounts.get(remoteAccount.id)).toEqual(remoteAccount);
+  });
+
+  it("soft-deletes a local budget entry duplicating a pulled entry's (category_id, month) without enqueuing anything", async () => {
+    const pair = { category_id: "cat-1", month: "2026-03" };
+    const local: BudgetEntry = { id: "local-id", ...baseSync, ...pair, budgeted: 100 };
+    await db.budget_entries.add(local);
+    const remote: BudgetEntry = {
+      id: "remote-id",
+      ...baseSync,
+      hlc_physical: baseSync.hlc_physical + 1,
+      server_version: 4,
+      ...pair,
+      budgeted: 250,
+    };
+    vi.mocked(fetch).mockResolvedValue(
+      okResponse(baseServerBody({ server_version: 4, changes: [{ table: "budget_entries", row: remote }] })),
+    );
+
+    await runSync();
+
+    expect(await db.budget_entries.get(remote.id)).toEqual(remote);
+    expect((await db.budget_entries.get(local.id))?.deleted_at).not.toBeNull();
+    expect(await db.outbox.count()).toBe(0);
   });
 
   it("pauses on a schema_version mismatch without applying changes or advancing the cursor", async () => {
