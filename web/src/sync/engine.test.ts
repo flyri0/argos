@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { clearDeviceToken, setDeviceToken } from "../auth";
 import { db } from "../db/db";
 import { outbox } from "../db/helpers";
 import type { Account } from "../db/types";
@@ -80,6 +81,35 @@ describe("runSync", () => {
         }),
       }),
     );
+  });
+
+  describe("device auth (§6.2)", () => {
+    afterEach(() => {
+      clearDeviceToken();
+    });
+
+    it("attaches this device's token as a bearer credential when it has one", async () => {
+      setDeviceToken("device-token-123");
+      vi.mocked(fetch).mockResolvedValue(okResponse(baseServerBody()));
+
+      await runSync();
+
+      expect(fetch).toHaveBeenCalledWith(
+        "/sync",
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer device-token-123" }),
+        }),
+      );
+    });
+
+    it("sends no Authorization header before this device has a token", async () => {
+      vi.mocked(fetch).mockResolvedValue(okResponse(baseServerBody()));
+
+      await runSync();
+
+      const [, init] = vi.mocked(fetch).mock.calls[0];
+      expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+    });
   });
 
   it("marks an applied mutation's outbox entry synced and stores the new cursor", async () => {

@@ -1,3 +1,4 @@
+import { getDeviceToken } from "../auth";
 import { db } from "../db/db";
 import { outbox } from "../db/helpers";
 import { observeHlc } from "../db/hlc";
@@ -153,11 +154,18 @@ export async function runSync(): Promise<void> {
       row: entry.row,
     }));
 
+    // §6.2: every request needs this device's token, /sync included — a
+    // localhost caller doesn't need one at all, and the server simply
+    // ignores the header's absence in that case.
+    const token = getDeviceToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
     let response: Response;
     try {
       response = await fetch("/sync", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ since: getCursor(), mutations }),
       });
     } catch {
