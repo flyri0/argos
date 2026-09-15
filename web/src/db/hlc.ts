@@ -11,18 +11,72 @@
 import { generateUUID } from "../lib/uuid";
 
 const NODE_ID_KEY = "argos.node_id";
+const LAST_HLC_KEY = "argos.hlc_last";
+
+// Only used when localStorage is unavailable (e.g. blocked site data): the
+// clock keeps working for this page's lifetime instead of crashing writes.
+let fallbackNodeId: string | null = null;
 
 function nodeId(): string {
-  let id = localStorage.getItem(NODE_ID_KEY);
-  if (!id) {
-    id = generateUUID();
-    localStorage.setItem(NODE_ID_KEY, id);
+  try {
+    let id = localStorage.getItem(NODE_ID_KEY);
+    if (!id) {
+      id = generateUUID();
+      localStorage.setItem(NODE_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    fallbackNodeId ??= generateUUID();
+    return fallbackNodeId;
   }
-  return id;
 }
 
 let lastPhysical = 0;
 let lastCounter = 0;
+
+// §2.3: the clock state lives in localStorage so it survives reloads and is
+// shared by every tab of this device. Loaded at the start of every call so a
+// tab sees another tab's advances; the in-memory copy is kept as the floor in
+// case a write back to storage ever failed.
+function loadPersisted(): void {
+  try {
+    const raw = localStorage.getItem(LAST_HLC_KEY);
+    if (raw === null) return;
+    const parsed = JSON.parse(raw) as { physical?: unknown; counter?: unknown };
+    if (typeof parsed.physical !== "number" || typeof parsed.counter !== "number") return;
+    if (
+      parsed.physical > lastPhysical ||
+      (parsed.physical === lastPhysical && parsed.counter > lastCounter)
+    ) {
+      lastPhysical = parsed.physical;
+      lastCounter = parsed.counter;
+    }
+  } catch {
+    // Unavailable or corrupt storage: continue from the in-memory state.
+  }
+}
+
+function savePersisted(): void {
+  try {
+    localStorage.setItem(
+      LAST_HLC_KEY,
+      JSON.stringify({ physical: lastPhysical, counter: lastCounter }),
+    );
+  } catch {
+    // Unavailable storage: the in-memory state still keeps this page monotonic.
+  }
+}
+
+// Whether a persisted clock exists — seedHlcFromLocalData only seeds a
+// device that has none. Unreadable storage counts as missing, so seeding
+// still protects a device whose storage is blocked.
+export function hasPersistedHlc(): boolean {
+  try {
+    return localStorage.getItem(LAST_HLC_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
 
 export interface HlcStamp {
   hlc_physical: number;
@@ -31,6 +85,7 @@ export interface HlcStamp {
 }
 
 export function nextHlc(): HlcStamp {
+  loadPersisted();
   const physical = Date.now();
   if (physical > lastPhysical) {
     lastPhysical = physical;
@@ -38,6 +93,7 @@ export function nextHlc(): HlcStamp {
   } else {
     lastCounter += 1;
   }
+  savePersisted();
   return {
     hlc_physical: lastPhysical,
     hlc_counter: lastCounter,
@@ -53,6 +109,7 @@ export function nextHlc(): HlcStamp {
 // counter is greater, incremented by one — so the result is always strictly
 // greater than both the prior local value and the received one.
 export function observeHlc(received: HlcStamp): void {
+  loadPersisted();
   if (lastPhysical > received.hlc_physical) {
     lastCounter += 1;
   } else if (received.hlc_physical > lastPhysical) {
@@ -61,6 +118,7 @@ export function observeHlc(received: HlcStamp): void {
   } else {
     lastCounter = Math.max(lastCounter, received.hlc_counter) + 1;
   }
+  savePersisted();
 }
 
 // Mirrors Go's `Compare`: physical, then counter, then node id as the final

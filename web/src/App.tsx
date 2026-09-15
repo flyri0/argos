@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { seedHlcFromLocalData } from "./db";
 import { AccountsScreen } from "./features/accounts/AccountsScreen";
 import { BudgetScreen } from "./features/budget/BudgetScreen";
 import { CategoriesScreen } from "./features/categories/CategoriesScreen";
@@ -22,8 +23,31 @@ const TABS: { id: Tab; labelKey: string }[] = [
 function App() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("accounts");
+  const [clockReady, setClockReady] = useState(false);
 
-  useEffect(() => startSyncWorker(), []);
+  // §2.3: the HLC must be seeded from the local replica before the first
+  // sync or any write, or a device with a lagging clock stamps edits lower
+  // than rows it already holds. A seeding failure (e.g. IndexedDB
+  // unavailable) must not lock the user out, so the app starts regardless.
+  useEffect(() => {
+    let cancelled = false;
+    let stopSyncWorker: (() => void) | undefined;
+    seedHlcFromLocalData()
+      .catch(() => undefined)
+      .then(() => {
+        if (cancelled) return;
+        setClockReady(true);
+        stopSyncWorker = startSyncWorker();
+      });
+    return () => {
+      cancelled = true;
+      stopSyncWorker?.();
+    };
+  }, []);
+
+  if (!clockReady) {
+    return <p>{t("app.loading")}</p>;
+  }
 
   return (
     <div>

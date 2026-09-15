@@ -81,6 +81,90 @@ describe("observeHlc", () => {
   });
 });
 
+// §2.3: the clock is persisted in localStorage and shared across reloads and
+// tabs. A "reload" or a second "tab" is a fresh module instance
+// (vi.resetModules + re-import) sharing the same localStorage.
+async function freshHlcModule() {
+  vi.resetModules();
+  return import("./hlc");
+}
+
+describe("persisted clock", () => {
+  it("stays strictly increasing across a reload even when the wall clock moved backwards", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5000);
+    const before = nextHlc();
+
+    const reloaded = await freshHlcModule();
+    vi.setSystemTime(1000);
+    const after = reloaded.nextHlc();
+
+    expect(reloaded.compareHlc(after, before)).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it("remembers an observed far-ahead HLC after a reload", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    observeHlc({ hlc_physical: 9_000_000, hlc_counter: 3, hlc_node_id: "remote-node" });
+
+    const reloaded = await freshHlcModule();
+    const next = reloaded.nextHlc();
+
+    expect(next.hlc_physical).toBe(9_000_000);
+    expect(next.hlc_counter).toBeGreaterThan(3);
+    vi.useRealTimers();
+  });
+
+  it("gives two tabs sharing storage strictly increasing values when they alternate", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2000);
+    const tabA = await freshHlcModule();
+    const tabB = await freshHlcModule();
+    expect(tabA).not.toBe(tabB);
+
+    const stamps = [
+      tabA.nextHlc(),
+      tabB.nextHlc(),
+      tabA.nextHlc(),
+      tabB.nextHlc(),
+      tabA.nextHlc(),
+      tabB.nextHlc(),
+    ];
+
+    for (let i = 1; i < stamps.length; i++) {
+      expect(tabA.compareHlc(stamps[i], stamps[i - 1])).toBe(1);
+    }
+    vi.useRealTimers();
+  });
+
+  it("falls back to in-memory state without crashing when storage throws", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime(3000);
+      const fresh = await freshHlcModule();
+
+      const first = fresh.nextHlc();
+      fresh.observeHlc({ hlc_physical: 3000, hlc_counter: 7, hlc_node_id: "remote-node" });
+      const second = fresh.nextHlc();
+
+      expect(fresh.compareHlc(second, first)).toBe(1);
+      expect(second.hlc_counter).toBe(9);
+      expect(fresh.hasPersistedHlc()).toBe(false);
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("compareHlc", () => {
   // Mirrors TestCompare_TiebreaksOnNodeID.
   it("tiebreaks on node id when physical and counter are equal", () => {

@@ -11,6 +11,7 @@ export {
 } from "./helpers";
 export { computeBalance } from "./balance";
 export { nextHlc, observeHlc, compareHlc, type HlcStamp } from "./hlc";
+export { seedHlcFromLocalData } from "./hlcSeed";
 export {
   isCategoryInUse,
   isPayeeInUse,
