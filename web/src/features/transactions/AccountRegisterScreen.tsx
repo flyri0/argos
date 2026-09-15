@@ -11,6 +11,7 @@ import {
   findTransferSibling,
   nextHlc,
   payees,
+  setTransferLegCleared,
   transactions,
   updateTransfer,
   type Account,
@@ -159,6 +160,10 @@ export function AccountRegisterScreen({ account, onBack }: AccountRegisterScreen
   }
 
   async function handleToggleCleared(transaction: Transaction) {
+    if (transaction.transfer_id !== null) {
+      await setTransferLegCleared(transaction.id, !transaction.cleared);
+      return;
+    }
     await transactions.update(transaction.id, {
       cleared: !transaction.cleared,
       ...nextHlc(),

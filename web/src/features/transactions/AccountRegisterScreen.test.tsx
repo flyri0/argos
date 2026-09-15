@@ -237,6 +237,36 @@ describe("AccountRegisterScreen", () => {
     expect(mirrorRows[0].transfer_id).not.toBeNull();
   });
 
+  it("toggling cleared on a transfer leg enqueues both legs in one group", async () => {
+    const checking = makeAccount({ name: "Checking" });
+    const savings = makeAccount({ name: "Savings" });
+    await accounts.create(checking);
+    await accounts.create(savings);
+
+    const user = userEvent.setup();
+    render(<AccountRegisterScreen account={checking} onBack={() => {}} />);
+
+    await user.click(await screen.findByRole("button", { name: "Add transaction" }));
+    await user.click(screen.getByLabelText("This is a transfer"));
+    await user.selectOptions(screen.getByLabelText("Transfer to account"), savings.id);
+    await user.type(screen.getByLabelText("Amount"), "50");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Transfer: Savings");
+    const entriesBefore = await db.outbox.count();
+
+    await user.click(await screen.findByRole("button", { name: "Mark cleared" }));
+
+    await waitFor(async () => {
+      const newEntries = (await db.outbox.toArray()).slice(entriesBefore);
+      expect(newEntries).toHaveLength(2);
+      expect(new Set(newEntries.map((e) => e.group_id)).size).toBe(1);
+      expect(newEntries[0].group_id).not.toBeNull();
+    });
+    const legs = await db.transactions.toArray();
+    const newEntries = (await db.outbox.toArray()).slice(entriesBefore);
+    expect(newEntries.map((e) => e.row.id).sort()).toEqual(legs.map((l) => l.id).sort());
+  });
+
   it("deleting either leg of a transfer removes both", async () => {
     const checking = makeAccount({ name: "Checking" });
     const savings = makeAccount({ name: "Savings" });

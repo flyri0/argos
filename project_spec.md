@@ -60,6 +60,7 @@
 - **Why HLC instead of a raw timestamp**: a plain client-set `updated_at` is vulnerable to a device with a wrong system clock — it could win every conflict indefinitely and silently overwrite newer, correct data from other devices, with no error surfaced anywhere. Actual Budget solves this with a Hybrid Logical Clock (its `@actual-app/crdt` package), and Argos adopts the same mechanism: each HLC value is a triple `(physical_ms, counter, node_id)`. A device advances its clock to `max(its own physical time, physical time seen in any message it has received)`, incrementing the counter whenever the physical component doesn't move forward. This guarantees monotonicity per device and preserves causal order — if device A's write caused device B's later write, B's timestamp is guaranteed greater — even when the two devices' wall clocks disagree.
 - As a further safeguard beyond Actual's own design, the server rejects (rather than silently accepts) any incoming HLC whose physical component is further than a small bound (e.g. a few minutes) ahead of the server's own clock, surfacing a clear "check this device's clock" error instead of letting a badly-drifted device poison the dataset.
 - Conflict resolution: **last-write-wins per row**, keyed by the HLC triple (compare `physical_ms`, then `counter`, then `node_id` as a final deterministic tiebreak). This is a deliberate simplification over full per-field CRDT merge (which Actual also layers on top of its HLC) — appropriate because Argos targets a single user across a handful of personal devices, where true concurrent edits to the same row are rare. Per-field merge is listed as a possible future enhancement, not an MVP requirement. An incoming HLC exactly equal to the stored row's is the same write arriving again, not a conflict: within a unit it is skipped as already applied (§2.4).
+- **Transfers are written as a pair**: row-level last-write-wins with full-row upserts would otherwise let a newer write to one leg (carrying a stale amount or a stale `deleted_at`) desynchronize it from the other. So any write to a transfer leg — an edit, a delete, or a `cleared` toggle — sends both legs, as full rows with fresh HLCs, in one group (§2.4). The pair is last-write-wins as a unit; `cleared` stays a per-leg value, so a toggle re-stamps the sibling without changing it.
 - Deletes are never physical on the server: a delete sets `deleted_at` and bumps `server_version` like any other write, so the tombstone can propagate to other devices on their next sync instead of silently disappearing. Clients purge fully-synced tombstones locally once acknowledged.
 - The server responds to a sync push with any row whose `server_version` is greater than the client's last-seen cursor, which the client applies to its local IndexedDB replica.
 - Each device stores a copy of the server's `sync_id` (see §5.2, `server_meta`). If the server's `sync_id` ever changes — a restore from backup, a manual reset — the client detects the mismatch and re-downloads the full dataset instead of attempting to merge against a server history it no longer shares.
@@ -96,6 +97,7 @@ This is the exact, binding shape of the `/sync` exchange — implementations mus
 - `mutations`: a flat list, in any order. Each entry's `op` is `"upsert"` (covers both create and update — every write replaces the row's full current state, there is no separate "create" shape) or `"delete"` (still carries a fresh HLC triple like any other write, and sets `deleted_at` in `row`).
 - `group_id`: `null` for standalone mutations. Mutations sharing the same non-null `group_id` string within one request are applied atomically as a group (§2.3) — currently used for the two sides of a transfer, and for a category/payee delete bundled with its `reassign_to` move. A non-null `group_id` is a fresh UUID generated per user operation; it must never reuse a row id or a `transfer_id`. Reusing one would merge unsynced mutations from different operations on the same rows into a single unit, letting a retried older operation drag a newer edit down with it.
 - **Already-applied members**: inside a unit, a mutation whose HLC triple is exactly equal to the stored row's HLC is treated as already applied (typically a retry after a lost response) and skipped. If any member is strictly older than its stored row, the whole unit is `rejected_stale`. If every member was skipped, the unit is `rejected_stale`. Otherwise the unit is `applied`.
+- **Transfer pair validation**: after applying a unit's mutations and before committing, the server validates every `transfer_id` the unit touched — the incoming row's `transfer_id` for each `transactions` upsert, plus each mutated leg's previously stored `transfer_id` (so an upsert that changes it, or a delete, is covered) — against the §5.2 invariant. A violation rejects the whole unit as `rejected_invalid` with `TRANSFER_PAIR_INVALID`. Transfer ids the unit didn't touch are not validated, so pre-existing data stays readable.
 
 **Response:**
 
@@ -253,7 +255,11 @@ transactions
   cleared       boolean         -- defaults to false on creation
   notes         text
   transfer_id   uuid     null   -- links the two sides of an inter-account transfer; null for
-                                 -- every non-transfer transaction (the common case)
+                                 -- every non-transfer transaction (the common case).
+                                 -- Invariant: exactly two transaction rows share a transfer_id,
+                                 -- in different accounts, and they are either both deleted or
+                                 -- both live with amounts summing to zero. Enforced by /sync
+                                 -- (§2.3/§2.4).
 
 budget_entries
   category_id   uuid references categories
@@ -382,6 +388,7 @@ A living list — any new machine-readable error code introduced in code must be
 | `DEVICE_NOT_FOUND` | 404 | no device with the given `:id` (§6.2) |
 | `CLOCK_SKEW_TOO_LARGE` | 409 | an incoming HLC's physical time is too far ahead of the server's (§2.3) |
 | `SYNC_MUTATION_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | a `/sync` mutation's row is structurally invalid, references a row that doesn't exist, or fails a domain-specific check (e.g. a `budget_entries` row for an income-group category, §5.3) |
+| `TRANSFER_PAIR_INVALID` | n/a — nested in a `/sync` result, not a top-level status (§2.4) | after applying a unit, a `transfer_id` it touched no longer has exactly two legs in different accounts that are both deleted or both live and balanced (§5.2) |
 | `VALIDATION_ERROR` | 400 | a request field is missing, malformed, or fails a domain-specific check (wrong format, wrong type, must reference a different row, etc.) |
 | `INVALID_JSON` | 400 | the request body could not be parsed as JSON |
 | `INTERNAL_ERROR` | 500 | an unexpected server-side error (e.g. a database I/O failure) unrelated to the caller's input |

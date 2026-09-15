@@ -122,6 +122,38 @@ export async function updateTransfer(
   });
 }
 
+// §2.3: a cleared toggle on a transfer leg still writes both legs as one
+// group. `cleared` is per-leg, so the sibling only gets a fresh HLC — but it
+// must travel with the toggled leg, or a lone full-row upsert could revive
+// or unbalance the pair on the server.
+export async function setTransferLegCleared(
+  transactionId: string,
+  cleared: boolean,
+): Promise<void> {
+  const groupId = generateUUID();
+
+  await db.transaction("rw", db.transactions, db.outbox, async () => {
+    const transaction = await db.transactions.get(transactionId);
+    if (!transaction || transaction.transfer_id === null) return;
+
+    await db.transactions.update(transactionId, { cleared, ...nextHlc() });
+    const updated = await db.transactions.get(transactionId);
+    if (updated) await enqueueRowMutation("transactions", updated, groupId);
+
+    const sibling = await db.transactions
+      .where("transfer_id")
+      .equals(transaction.transfer_id)
+      .and((row) => row.id !== transactionId && row.deleted_at === null)
+      .first();
+
+    if (sibling) {
+      await db.transactions.update(sibling.id, { ...nextHlc() });
+      const updatedSibling = await db.transactions.get(sibling.id);
+      if (updatedSibling) await enqueueRowMutation("transactions", updatedSibling, groupId);
+    }
+  });
+}
+
 // A transfer is two independent rows linked only by transfer_id, with no
 // foreign key between them, so deleting just one would leave the other
 // pointing at money that silently vanished from one side of the ledger.

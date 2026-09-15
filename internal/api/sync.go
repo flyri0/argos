@@ -241,7 +241,13 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) 
 	defer tx.Rollback()
 
 	skipped := 0
+	touchedTransfers := make(map[string]bool)
 	for _, m := range u.mutations {
+		if m.Table == "transactions" {
+			if err := collectTransferIDs(ctx, tx, m, touchedTransfers); err != nil {
+				return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "INTERNAL_ERROR", Message: err.Error()}}
+			}
+		}
 		err := applyMutation(ctx, tx, m, now)
 		switch {
 		case err == nil:
@@ -264,11 +270,53 @@ func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) 
 		return syncResult{Table: u.table, ID: u.id, Status: "rejected_stale"}
 	}
 
+	// §2.4: checked against the unit's combined result, since a valid pair
+	// write is only balanced once both legs are applied.
+	for transferID := range touchedTransfers {
+		err := db.CheckTransferPairTx(ctx, tx, transferID)
+		switch {
+		case errors.Is(err, db.ErrTransferPairInvalid):
+			return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{
+				Code:    "TRANSFER_PAIR_INVALID",
+				Message: "transfer " + transferID + " must have two legs in different accounts, both deleted or both live and balanced",
+			}}
+		case err != nil:
+			return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "INTERNAL_ERROR", Message: err.Error()}}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "SYNC_MUTATION_INVALID", Message: err.Error()}}
 	}
 
 	return syncResult{Table: u.table, ID: u.id, Status: "applied"}
+}
+
+// collectTransferIDs adds every transfer_id a transactions mutation touches
+// to into: the row's stored transfer_id (covering deletes and upserts that
+// change or clear it) and, for an upsert, the incoming one. A row that fails
+// to parse is left for applyMutation to report.
+func collectTransferIDs(ctx context.Context, tx *sql.Tx, m syncMutation, into map[string]bool) error {
+	var probe struct {
+		ID         string  `json:"id"`
+		TransferID *string `json:"transfer_id"`
+	}
+	if err := json.Unmarshal(m.Row, &probe); err != nil {
+		return nil
+	}
+	if uuidPattern.MatchString(probe.ID) {
+		stored, err := db.TransferIDOfTx(ctx, tx, probe.ID)
+		if err != nil {
+			return err
+		}
+		if stored.Valid {
+			into[stored.String] = true
+		}
+	}
+	if m.Op == "upsert" && probe.TransferID != nil && *probe.TransferID != "" {
+		into[*probe.TransferID] = true
+	}
+	return nil
 }
 
 // applyMutation validates and applies one mutation's row within tx. A

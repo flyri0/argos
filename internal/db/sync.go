@@ -10,6 +10,10 @@ import (
 // (reserved for V1 splits, §5.2) names a transaction that doesn't exist.
 var ErrParentTransactionNotFound = errors.New("parent transaction not found")
 
+// ErrTransferPairInvalid is returned by CheckTransferPairTx when a
+// transfer_id's rows break §5.2's pair invariant.
+var ErrTransferPairInvalid = errors.New("transfer legs are not a valid pair")
+
 // BudgetEntryKeyTakenError is returned when a budget_entries upsert's
 // (category_id, month) pair is already stored — live or tombstoned — under
 // a different id. The pair is the entry's identity (§5.2), so the caller
@@ -362,6 +366,39 @@ func SyncUpsertTransaction(ctx context.Context, tx *sql.Tx, in SyncTransaction) 
 		in.ID, in.AccountID, in.CategoryID, in.PayeeID, in.ParentID, in.Date, in.Amount, in.Cleared, in.Notes, in.TransferID,
 		in.HLCPhysical, in.HLCCounter, in.HLCNodeID, version)
 	return err
+}
+
+// CheckTransferPairTx enforces §5.2's transfer invariant for transferID
+// within tx: exactly two rows, in different accounts, either both deleted or
+// both live with amounts summing to zero. Returns ErrTransferPairInvalid on
+// a violation.
+func CheckTransferPairTx(ctx context.Context, tx *sql.Tx, transferID string) error {
+	var total, live, liveSum, accounts int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN amount ELSE 0 END), 0),
+			COUNT(DISTINCT account_id)
+		FROM transactions WHERE transfer_id = ?`, transferID).Scan(&total, &live, &liveSum, &accounts)
+	if err != nil {
+		return err
+	}
+	if total == 2 && accounts == 2 && (live == 0 || (live == 2 && liveSum == 0)) {
+		return nil
+	}
+	return ErrTransferPairInvalid
+}
+
+// TransferIDOfTx returns the stored transfer_id of the transactions row with
+// the given id, or a null value if the row doesn't exist or isn't a transfer
+// leg.
+func TransferIDOfTx(ctx context.Context, tx *sql.Tx, id string) (sql.NullString, error) {
+	var transferID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT transfer_id FROM transactions WHERE id = ?`, id).Scan(&transferID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.NullString{}, nil
+	}
+	return transferID, err
 }
 
 // SyncBudgetEntry is the full-row upsert shape for /sync (§2.4).

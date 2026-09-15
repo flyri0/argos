@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -420,6 +421,196 @@ func transferLegMutation(groupID, legID string, amount, hlcPhysical int64) strin
 		"date": "2026-01-01", "amount": %d, "cleared": false, "notes": "",
 		"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
 	}}`, groupID, legID, account, amount, hlcPhysical)
+}
+
+// transferLegUpsert is a transfer leg upsert with a chosen cleared flag; an
+// empty groupID sends it as a lone (null group) mutation.
+func transferLegUpsert(groupID, legID string, amount, hlcPhysical int64, cleared bool) string {
+	account := "11111111-1111-1111-1111-111111111111"
+	if legID == transferLeg2 {
+		account = "77777777-7777-7777-7777-777777777777"
+	}
+	return fmt.Sprintf(`{"table": "transactions", "op": "upsert", "group_id": %s, "row": {
+		"id": %q, "account_id": %q, "transfer_id": "abababab-abab-abab-abab-abababababab",
+		"date": "2026-01-01", "amount": %d, "cleared": %t, "notes": "",
+		"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+	}}`, jsonGroupID(groupID), legID, account, amount, cleared, hlcPhysical)
+}
+
+func transferLegDelete(groupID, legID string, hlcPhysical int64) string {
+	return fmt.Sprintf(`{"table": "transactions", "op": "delete", "group_id": %s, "row": {
+		"id": %q, "deleted_at": %d,
+		"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+	}}`, jsonGroupID(groupID), legID, hlcPhysical, hlcPhysical)
+}
+
+func jsonGroupID(groupID string) string {
+	if groupID == "" {
+		return "null"
+	}
+	return fmt.Sprintf("%q", groupID)
+}
+
+type transferLegRow struct {
+	Amount    int64
+	Cleared   bool
+	Deleted   bool
+	HLCPhysic int64
+}
+
+func transferLegRowState(t *testing.T, h *SyncHandler, legID string) transferLegRow {
+	t.Helper()
+	var r transferLegRow
+	var deletedAt sql.NullInt64
+	if err := h.DB.QueryRow(`SELECT amount, cleared, deleted_at, hlc_physical FROM transactions WHERE id = ?`, legID).
+		Scan(&r.Amount, &r.Cleared, &deletedAt, &r.HLCPhysic); err != nil {
+		t.Fatalf("query leg %s: %v", legID, err)
+	}
+	r.Deleted = deletedAt.Valid
+	return r
+}
+
+func expectTransferPairInvalid(t *testing.T, resp syncResponse) {
+	t.Helper()
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_invalid" ||
+		resp.Results[0].Error == nil || resp.Results[0].Error.Code != "TRANSFER_PAIR_INVALID" {
+		t.Fatalf("expected rejected_invalid TRANSFER_PAIR_INVALID, got %+v", resp.Results)
+	}
+}
+
+func expectApplied(t *testing.T, resp syncResponse) {
+	t.Helper()
+	if len(resp.Results) != 1 || resp.Results[0].Status != "applied" {
+		t.Fatalf("expected applied, got %+v", resp.Results)
+	}
+}
+
+// createTransferViaSync creates a balanced transfer: leg 1 -1000 in
+// Checking, leg 2 +1000 in Savings, both at hlc 1000.
+func createTransferViaSync(t *testing.T, h *SyncHandler) {
+	t.Helper()
+	transferSyncSetup(t, h)
+	const group = "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1"
+	expectApplied(t, postSync(t, h, syncBody(
+		transferLegUpsert(group, transferLeg1, -1000, 1000, false),
+		transferLegUpsert(group, transferLeg2, 1000, 1000, false),
+	)))
+}
+
+func TestSync_TransferGroupCreatingBothLegsApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+
+	if l1, l2 := transferLegRowState(t, h, transferLeg1), transferLegRowState(t, h, transferLeg2); l1.Amount != -1000 || l2.Amount != 1000 {
+		t.Fatalf("expected a balanced pair, got %+v / %+v", l1, l2)
+	}
+}
+
+func TestSync_TransferLoneLegUpsertUnbalancingPairRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+
+	resp := postSync(t, h, syncBody(transferLegUpsert("", transferLeg1, -1500, 2000, false)))
+
+	expectTransferPairInvalid(t, resp)
+	if l1 := transferLegRowState(t, h, transferLeg1); l1.Amount != -1000 || l1.HLCPhysic != 1000 {
+		t.Fatalf("expected leg 1 unchanged, got %+v", l1)
+	}
+	if l2 := transferLegRowState(t, h, transferLeg2); l2.Amount != 1000 || l2.HLCPhysic != 1000 {
+		t.Fatalf("expected leg 2 unchanged, got %+v", l2)
+	}
+}
+
+func TestSync_TransferGroupWithUnbalancedAmountsRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	transferSyncSetup(t, h)
+	const group = "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1"
+
+	resp := postSync(t, h, syncBody(
+		transferLegUpsert(group, transferLeg1, -1000, 1000, false),
+		transferLegUpsert(group, transferLeg2, 900, 1000, false),
+	))
+
+	expectTransferPairInvalid(t, resp)
+	var count int
+	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no legs committed, got %d", count)
+	}
+}
+
+func TestSync_TransferLoneLegDeleteRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+
+	resp := postSync(t, h, syncBody(transferLegDelete("", transferLeg1, 2000)))
+
+	expectTransferPairInvalid(t, resp)
+	if l1 := transferLegRowState(t, h, transferLeg1); l1.Deleted {
+		t.Fatalf("expected leg 1 still live, got %+v", l1)
+	}
+}
+
+func TestSync_TransferGroupDeletingBothLegsApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+	const group = "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2"
+
+	expectApplied(t, postSync(t, h, syncBody(
+		transferLegDelete(group, transferLeg1, 2000),
+		transferLegDelete(group, transferLeg2, 2000),
+	)))
+	if l1, l2 := transferLegRowState(t, h, transferLeg1), transferLegRowState(t, h, transferLeg2); !l1.Deleted || !l2.Deleted {
+		t.Fatalf("expected both legs deleted, got %+v / %+v", l1, l2)
+	}
+}
+
+// Scenario 1: device A edits the transfer 1000→1500 as a group; device B,
+// which never saw the edit, toggles cleared on leg 1 alone with a newer HLC
+// and the old amount. Applying it would leave -1000 / +1500.
+func TestSync_TransferEditThenLoneNewerClearedUpsertRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+	const editGroup = "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2"
+
+	expectApplied(t, postSync(t, h, syncBody(
+		transferLegUpsert(editGroup, transferLeg1, -1500, 2000, false),
+		transferLegUpsert(editGroup, transferLeg2, 1500, 2000, false),
+	)))
+
+	resp := postSync(t, h, syncBody(transferLegUpsert("", transferLeg1, -1000, 3000, true)))
+
+	expectTransferPairInvalid(t, resp)
+	if l1 := transferLegRowState(t, h, transferLeg1); l1.Amount != -1500 || l1.Cleared {
+		t.Fatalf("expected leg 1 to keep the edit, got %+v", l1)
+	}
+}
+
+// Scenario 2: device A deletes the transfer as a group; device B, which
+// never saw the delete, toggles cleared on leg 1 — now sent as a newer group
+// re-stamping both legs. The pair is revived together and stays balanced.
+func TestSync_TransferDeleteThenNewerClearedPairGroupRevivesBoth(t *testing.T) {
+	h := newTestSyncHandler(t)
+	createTransferViaSync(t, h)
+	const deleteGroup = "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2"
+	const toggleGroup = "e3e3e3e3-e3e3-e3e3-e3e3-e3e3e3e3e3e3"
+
+	expectApplied(t, postSync(t, h, syncBody(
+		transferLegDelete(deleteGroup, transferLeg1, 2000),
+		transferLegDelete(deleteGroup, transferLeg2, 2000),
+	)))
+
+	expectApplied(t, postSync(t, h, syncBody(
+		transferLegUpsert(toggleGroup, transferLeg1, -1000, 3000, true),
+		transferLegUpsert(toggleGroup, transferLeg2, 1000, 3000, false),
+	)))
+
+	l1, l2 := transferLegRowState(t, h, transferLeg1), transferLegRowState(t, h, transferLeg2)
+	if l1.Deleted || l2.Deleted || l1.Amount+l2.Amount != 0 || !l1.Cleared || l2.Cleared {
+		t.Fatalf("expected both legs live, balanced, only leg 1 cleared; got %+v / %+v", l1, l2)
+	}
 }
 
 func syncBody(mutations ...string) string {

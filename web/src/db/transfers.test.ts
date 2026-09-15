@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { db } from "./db";
 import { outbox, transactions } from "./helpers";
+import { compareHlc } from "./hlc";
 import {
   createTransfer,
   deleteTransaction,
   findTransferSibling,
+  setTransferLegCleared,
   updateTransfer,
 } from "./transfers";
 import type { Transaction } from "./types";
@@ -268,6 +270,40 @@ describe("deleteTransaction", () => {
     const plainDelete = plainEntries[plainEntries.length - 1];
     expect(plainDelete.op).toBe("delete");
     expect(plainDelete.group_id).toBeNull();
+  });
+});
+
+describe("setTransferLegCleared", () => {
+  it("changes only the target leg's cleared, re-stamps the sibling, and enqueues both under one fresh group (§2.3)", async () => {
+    await createTransfer({
+      id: "t1",
+      transferTransactionId: "t2",
+      accountId: "acc-checking",
+      transferAccountId: "acc-savings",
+      payeeId: null,
+      date: "2026-03-05",
+      amountMinor: -1000,
+      notes: "",
+    });
+    const siblingBefore = (await transactions.get("t2"))!;
+    const createGroup = (await outbox.listUnsynced())[0].group_id;
+
+    await setTransferLegCleared("t1", true);
+
+    const leg = (await transactions.get("t1"))!;
+    const sibling = (await transactions.get("t2"))!;
+    expect(leg.cleared).toBe(true);
+    expect(sibling.cleared).toBe(false);
+    expect(sibling.amount).toBe(siblingBefore.amount);
+    expect(compareHlc(sibling, siblingBefore)).toBeGreaterThan(0);
+
+    const toggleEntries = (await outbox.listUnsynced()).filter((e) => e.group_id !== createGroup);
+    expect(toggleEntries).toHaveLength(2);
+    expect(toggleEntries.map((e) => e.row.id).sort()).toEqual(["t1", "t2"]);
+    const groupId = toggleEntries[0].group_id;
+    expect(groupId).not.toBeNull();
+    expect(groupId).not.toBe(leg.transfer_id);
+    expect(toggleEntries.every((e) => e.group_id === groupId && e.op === "upsert")).toBe(true);
   });
 });
 

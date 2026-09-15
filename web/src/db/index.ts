@@ -21,6 +21,7 @@ export {
   createTransfer,
   deleteTransaction,
   findTransferSibling,
+  setTransferLegCleared,
   updateTransfer,
   type NewTransferInput,
   type TransferEditInput,
