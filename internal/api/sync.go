@@ -40,6 +40,18 @@ type clockSkewError struct{ msg string }
 
 func (e *clockSkewError) Error() string { return e.msg }
 
+// codedError is a rejected_invalid reason that carries its own §7.2 code
+// instead of the generic SYNC_MUTATION_INVALID.
+type codedError struct{ code, msg string }
+
+func (e *codedError) Error() string { return e.msg }
+
+// referenceDeletedError maps db.ErrReferenceDeleted to REFERENCE_DELETED
+// (§2.3), keeping the db error's table and id in the message.
+func referenceDeletedError(field string, err error) error {
+	return &codedError{code: "REFERENCE_DELETED", msg: field + " points at a deleted row (" + err.Error() + ")"}
+}
+
 // SyncHandler implements POST /sync (§2.4), backed by internal/db. Logger
 // is optional — tests constructing this directly often leave it nil, so
 // every use goes through the logger() accessor below rather than the
@@ -288,6 +300,10 @@ func (h *SyncHandler) applyUnitResult(ctx context.Context, u syncUnit, now time.
 			if errors.As(err, &skew) {
 				return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "CLOCK_SKEW_TOO_LARGE", Message: skew.Error()}}
 			}
+			var coded *codedError
+			if errors.As(err, &coded) {
+				return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: coded.code, Message: coded.msg}}
+			}
 			return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "SYNC_MUTATION_INVALID", Message: err.Error()}}
 		}
 	}
@@ -442,10 +458,18 @@ func applyDelete(ctx context.Context, tx *sql.Tx, table string, row json.RawMess
 		HLCCounter:  *req.HLCCounter,
 		HLCNodeID:   req.HLCNodeID,
 	})
-	if errors.Is(err, db.ErrNotFound) {
+	switch {
+	case errors.Is(err, db.ErrNotFound):
 		return errors.New("no " + table + " row with this id")
+	case errors.Is(err, db.ErrCategoryInUse):
+		return &codedError{code: "CATEGORY_IN_USE_NEEDS_REASSIGN", msg: "category still has live transactions or budget entries; move them in the same unit first"}
+	case errors.Is(err, db.ErrPayeeInUse):
+		return &codedError{code: "PAYEE_IN_USE_NEEDS_REASSIGN", msg: "payee still has live transactions; move them in the same unit first"}
+	case errors.Is(err, db.ErrAccountInUse):
+		return &codedError{code: "ACCOUNT_IN_USE", msg: "account still has live transactions"}
+	default:
+		return err
 	}
-	return err
 }
 
 func applyUpsert(ctx context.Context, tx *sql.Tx, table string, row json.RawMessage) error {
@@ -585,6 +609,9 @@ func applyUpsertCategory(ctx context.Context, tx *sql.Tx, row json.RawMessage) e
 	if errors.Is(err, db.ErrCategoryGroupNotFound) {
 		return errors.New("group_id does not reference an existing category group")
 	}
+	if errors.Is(err, db.ErrReferenceDeleted) {
+		return referenceDeletedError("group_id", err)
+	}
 	return err
 }
 
@@ -682,6 +709,8 @@ func applyUpsertTransaction(ctx context.Context, tx *sql.Tx, row json.RawMessage
 		return errors.New("payee_id does not reference an existing payee")
 	case errors.Is(err, db.ErrParentTransactionNotFound):
 		return errors.New("parent_id does not reference an existing transaction")
+	case errors.Is(err, db.ErrReferenceDeleted):
+		return referenceDeletedError("account_id, category_id, or payee_id", err)
 	default:
 		return err
 	}
@@ -750,6 +779,8 @@ func applyUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, row json.RawMessage
 		return errors.New("category_id does not reference an existing category")
 	case errors.Is(err, db.ErrIncomeCategoryNotBudgetable):
 		return errors.New("category_id belongs to the income group, which cannot be budgeted")
+	case errors.Is(err, db.ErrReferenceDeleted):
+		return referenceDeletedError("category_id", err)
 	default:
 		return err
 	}

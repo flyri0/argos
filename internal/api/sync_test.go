@@ -383,6 +383,247 @@ func TestSync_StaleMutationRejected(t *testing.T) {
 	}
 }
 
+const (
+	refNode       = "22222222-2222-2222-2222-222222222222"
+	refAccount    = "1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a"
+	refGroup      = "2b2b2b2b-2b2b-2b2b-2b2b-2b2b2b2b2b2b"
+	refCatC       = "3c3c3c3c-3c3c-3c3c-3c3c-3c3c3c3c3c3c"
+	refCatD       = "4d4d4d4d-4d4d-4d4d-4d4d-4d4d4d4d4d4d"
+	refPayeeP     = "5e5e5e5e-5e5e-5e5e-5e5e-5e5e5e5e5e5e"
+	refPayeeQ     = "6f6f6f6f-6f6f-6f6f-6f6f-6f6f6f6f6f6f"
+	refTxn        = "7a7a7a7a-7a7a-7a7a-7a7a-7a7a7a7a7a7a"
+	refEntry      = "8b8b8b8b-8b8b-8b8b-8b8b-8b8b8b8b8b8b"
+	refOtherGroup = "9c9c9c9c-9c9c-9c9c-9c9c-9c9c9c9c9c9c"
+	refNewCat     = "aeaeaeae-aeae-aeae-aeae-aeaeaeaeaeae"
+	refUnit       = "0d0d0d0d-0d0d-0d0d-0d0d-0d0d0d0d0d0d"
+)
+
+// referenceSyncSetup creates one account, a non-income group holding
+// categories C and D, and payees P and Q.
+func referenceSyncSetup(t *testing.T, h *SyncHandler) {
+	t.Helper()
+	category := func(id string, counter int) string {
+		return fmt.Sprintf(`{"table": "categories", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "group_id": %q, "name": %q, "hidden": false, "sort_order": 0,
+			"hlc_physical": 1000, "hlc_counter": %d, "hlc_node_id": %q
+		}}`, id, refGroup, id, counter, refNode)
+	}
+	payee := func(id string, counter int) string {
+		return fmt.Sprintf(`{"table": "payees", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": %q, "hlc_physical": 1000, "hlc_counter": %d, "hlc_node_id": %q
+		}}`, id, id, counter, refNode)
+	}
+	resp := postSync(t, h, syncBody(
+		fmt.Sprintf(`{"table": "accounts", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": "Checking", "type": "checking", "on_budget": true, "closed": false, "currency": "USD",
+			"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": %q
+		}}`, refAccount, refNode),
+		fmt.Sprintf(`{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": "Bills", "is_income": false, "sort_order": 0,
+			"hlc_physical": 1000, "hlc_counter": 1, "hlc_node_id": %q
+		}}`, refGroup, refNode),
+		category(refCatC, 2),
+		category(refCatD, 3),
+		payee(refPayeeP, 4),
+		payee(refPayeeQ, 5),
+	))
+	for _, r := range resp.Results {
+		if r.Status != "applied" {
+			t.Fatalf("setup mutation not applied: %+v", resp.Results)
+		}
+	}
+}
+
+func jsonStringOrNull(s string) string {
+	if s == "" {
+		return "null"
+	}
+	return fmt.Sprintf("%q", s)
+}
+
+// refTxnUpsert is the reference test transaction in the setup account; an
+// empty category or payee sends null.
+func refTxnUpsert(groupID, category, payee string, cleared bool, hlcPhysical int64) string {
+	return fmt.Sprintf(`{"table": "transactions", "op": "upsert", "group_id": %s, "row": {
+		"id": %q, "account_id": %q, "category_id": %s, "payee_id": %s,
+		"date": "2026-01-01", "amount": -500, "cleared": %t, "notes": "",
+		"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, jsonStringOrNull(groupID), refTxn, refAccount, jsonStringOrNull(category), jsonStringOrNull(payee), cleared, hlcPhysical, refNode)
+}
+
+func refDelete(groupID, table, id string, hlcPhysical int64) string {
+	return fmt.Sprintf(`{"table": %q, "op": "delete", "group_id": %s, "row": {
+		"id": %q, "deleted_at": %d, "hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, table, jsonStringOrNull(groupID), id, hlcPhysical, hlcPhysical, refNode)
+}
+
+func expectRejectedCode(t *testing.T, resp syncResponse, code string) {
+	t.Helper()
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_invalid" ||
+		resp.Results[0].Error == nil || resp.Results[0].Error.Code != code {
+		t.Fatalf("expected rejected_invalid %s, got %+v (error %+v)", code, resp.Results, firstResultError(resp))
+	}
+}
+
+func firstResultError(resp syncResponse) *apiErrorBody {
+	if len(resp.Results) == 0 {
+		return nil
+	}
+	return resp.Results[0].Error
+}
+
+func rowIsDeleted(t *testing.T, h *SyncHandler, table, id string) bool {
+	t.Helper()
+	var deletedAt sql.NullInt64
+	if err := h.DB.QueryRow(`SELECT deleted_at FROM `+table+` WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatalf("query %s %s: %v", table, id, err)
+	}
+	return deletedAt.Valid
+}
+
+func TestSync_CategoryDeleteWithLiveTransactionRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", refCatC, "", false, 2000))))
+
+	resp := postSync(t, h, syncBody(refDelete("", "categories", refCatC, 3000)))
+
+	expectRejectedCode(t, resp, "CATEGORY_IN_USE_NEEDS_REASSIGN")
+	if rowIsDeleted(t, h, "categories", refCatC) {
+		t.Fatalf("expected category C unchanged")
+	}
+}
+
+func TestSync_CategoryDeleteWithLiveBudgetEntryRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(fmt.Sprintf(`{"table": "budget_entries", "op": "upsert", "group_id": null, "row": {
+		"id": %q, "category_id": %q, "month": "2026-01", "budgeted": 100,
+		"hlc_physical": 2000, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, refEntry, refCatC, refNode))))
+
+	resp := postSync(t, h, syncBody(refDelete("", "categories", refCatC, 3000)))
+
+	expectRejectedCode(t, resp, "CATEGORY_IN_USE_NEEDS_REASSIGN")
+	if rowIsDeleted(t, h, "categories", refCatC) {
+		t.Fatalf("expected category C unchanged")
+	}
+}
+
+func TestSync_CategoryDeleteAfterMovingReferencesInSameGroupApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", refCatC, "", false, 2000))))
+
+	expectApplied(t, postSync(t, h, syncBody(
+		refTxnUpsert(refUnit, refCatD, "", false, 3000),
+		refDelete(refUnit, "categories", refCatC, 3001),
+	)))
+	if !rowIsDeleted(t, h, "categories", refCatC) {
+		t.Fatalf("expected category C deleted")
+	}
+}
+
+func TestSync_PayeeDeleteWithLiveTransactionRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", "", refPayeeP, false, 2000))))
+
+	resp := postSync(t, h, syncBody(refDelete("", "payees", refPayeeP, 3000)))
+
+	expectRejectedCode(t, resp, "PAYEE_IN_USE_NEEDS_REASSIGN")
+	if rowIsDeleted(t, h, "payees", refPayeeP) {
+		t.Fatalf("expected payee P unchanged")
+	}
+}
+
+func TestSync_PayeeDeleteAfterMovingReferencesInSameGroupApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", "", refPayeeP, false, 2000))))
+
+	expectApplied(t, postSync(t, h, syncBody(
+		refTxnUpsert(refUnit, "", refPayeeQ, false, 3000),
+		refDelete(refUnit, "payees", refPayeeP, 3001),
+	)))
+	if !rowIsDeleted(t, h, "payees", refPayeeP) {
+		t.Fatalf("expected payee P deleted")
+	}
+}
+
+func TestSync_AccountDeleteWithLiveTransactionRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", "", "", false, 2000))))
+
+	resp := postSync(t, h, syncBody(refDelete("", "accounts", refAccount, 3000)))
+
+	expectRejectedCode(t, resp, "ACCOUNT_IN_USE")
+	if rowIsDeleted(t, h, "accounts", refAccount) {
+		t.Fatalf("expected account unchanged")
+	}
+}
+
+func TestSync_TransactionUpsertIntoDeletedCategoryRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refDelete("", "categories", refCatD, 2000))))
+
+	resp := postSync(t, h, syncBody(refTxnUpsert("", refCatD, "", false, 3000)))
+
+	expectRejectedCode(t, resp, "REFERENCE_DELETED")
+}
+
+func TestSync_EditOfTransactionAlreadyInDeletedCategoryApplies(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", refCatC, "", false, 2000))))
+	// Legacy orphan: the category was tombstoned while still referenced.
+	if _, err := h.DB.Exec(`UPDATE categories SET deleted_at = 1 WHERE id = ?`, refCatC); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+
+	expectApplied(t, postSync(t, h, syncBody(refTxnUpsert("", refCatC, "", true, 3000))))
+
+	var cleared bool
+	if err := h.DB.QueryRow(`SELECT cleared FROM transactions WHERE id = ?`, refTxn).Scan(&cleared); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !cleared {
+		t.Fatalf("expected the edit to apply")
+	}
+}
+
+func TestSync_BudgetEntryIntoDeletedCategoryRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(refDelete("", "categories", refCatD, 2000))))
+
+	resp := postSync(t, h, syncBody(fmt.Sprintf(`{"table": "budget_entries", "op": "upsert", "group_id": null, "row": {
+		"id": %q, "category_id": %q, "month": "2026-01", "budgeted": 100,
+		"hlc_physical": 3000, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, refEntry, refCatD, refNode)))
+
+	expectRejectedCode(t, resp, "REFERENCE_DELETED")
+}
+
+func TestSync_CategoryUpsertIntoDeletedGroupRejected(t *testing.T) {
+	h := newTestSyncHandler(t)
+	referenceSyncSetup(t, h)
+	expectApplied(t, postSync(t, h, syncBody(fmt.Sprintf(`{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+		"id": %q, "name": "Old", "is_income": false, "sort_order": 1,
+		"hlc_physical": 1500, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, refOtherGroup, refNode))))
+	expectApplied(t, postSync(t, h, syncBody(refDelete("", "category_groups", refOtherGroup, 2000))))
+
+	resp := postSync(t, h, syncBody(fmt.Sprintf(`{"table": "categories", "op": "upsert", "group_id": null, "row": {
+		"id": %q, "group_id": %q, "name": "New", "hidden": false, "sort_order": 0,
+		"hlc_physical": 3000, "hlc_counter": 0, "hlc_node_id": %q
+	}}`, refNewCat, refOtherGroup, refNode)))
+
+	expectRejectedCode(t, resp, "REFERENCE_DELETED")
+}
+
 func TestSync_StaleResponseIncludesWinningRowBelowCursor(t *testing.T) {
 	h := newTestSyncHandler(t)
 	const x = "33333333-3333-3333-3333-333333333333"

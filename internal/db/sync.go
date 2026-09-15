@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 // ErrParentTransactionNotFound is returned when a transaction's parent_id
@@ -13,6 +14,44 @@ var ErrParentTransactionNotFound = errors.New("parent transaction not found")
 // ErrTransferPairInvalid is returned by CheckTransferPairTx when a
 // transfer_id's rows break §5.2's pair invariant.
 var ErrTransferPairInvalid = errors.New("transfer legs are not a valid pair")
+
+// ErrAccountInUse is returned by SyncDeleteRow for an account that still has
+// non-deleted transactions (§2.3).
+var ErrAccountInUse = errors.New("account in use")
+
+// ErrReferenceDeleted is returned (wrapped, naming the table and id) when a
+// /sync upsert points a reference at a soft-deleted row (§2.3).
+var ErrReferenceDeleted = errors.New("reference points at a deleted row")
+
+// checkLiveReferenceTx requires id to name a live row in table. A missing
+// row returns that table's not-found error; a tombstone returns
+// ErrReferenceDeleted, unless storedValue is already exactly id — a row that
+// already points at a tombstone must stay editable (§2.3).
+func checkLiveReferenceTx(ctx context.Context, tx *sql.Tx, table, id string, storedValue sql.NullString) error {
+	var deletedAt sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT deleted_at FROM `+table+` WHERE id = ?`, id).Scan(&deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		switch table {
+		case "accounts":
+			return ErrAccountNotFound
+		case "categories":
+			return ErrCategoryNotFound
+		case "payees":
+			return ErrPayeeNotFound
+		case "category_groups":
+			return ErrCategoryGroupNotFound
+		default:
+			return ErrNotFound
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if deletedAt.Valid && !(storedValue.Valid && storedValue.String == id) {
+		return fmt.Errorf("%w: %s %s", ErrReferenceDeleted, table, id)
+	}
+	return nil
+}
 
 // BudgetEntryKeyTakenError is returned when a budget_entries upsert's
 // (category_id, month) pair is already stored — live or tombstoned — under
@@ -115,7 +154,9 @@ type SyncDelete struct {
 // SyncDeleteRow soft-deletes the row with the given id in table, assigning
 // it a fresh server_version, regardless of whether it was already deleted
 // (a re-applied tombstone is a harmless no-op change). Returns ErrNotFound
-// if no row with that id exists in table at all, or ErrIncomeGroupRequired
+// if no row with that id exists in table at all; ErrCategoryInUse,
+// ErrPayeeInUse, or ErrAccountInUse if live rows still reference it (§5.4);
+// or ErrIncomeGroupRequired
 // if table is "category_groups" and the row is the current income group
 // (§5.2: it cannot be deleted). table must be one of syncTables — callers
 // check IsSyncTable before calling.
@@ -126,6 +167,31 @@ func SyncDeleteRow(ctx context.Context, tx *sql.Tx, table string, in SyncDelete)
 	}
 	if !exists {
 		return ErrNotFound
+	}
+
+	// §5.4 on /sync: runs inside the unit's transaction, after its earlier
+	// mutations, so a reassignment group that moved the references passes.
+	inUse := map[string]struct {
+		query string
+		err   error
+	}{
+		"categories": {`SELECT (SELECT COUNT(*) FROM transactions WHERE category_id = ? AND deleted_at IS NULL)
+			+ (SELECT COUNT(*) FROM budget_entries WHERE category_id = ? AND deleted_at IS NULL)`, ErrCategoryInUse},
+		"payees":   {`SELECT COUNT(*) FROM transactions WHERE payee_id = ? AND deleted_at IS NULL`, ErrPayeeInUse},
+		"accounts": {`SELECT COUNT(*) FROM transactions WHERE account_id = ? AND deleted_at IS NULL`, ErrAccountInUse},
+	}
+	if check, ok := inUse[table]; ok {
+		args := []any{in.ID}
+		if table == "categories" {
+			args = append(args, in.ID)
+		}
+		var count int64
+		if err := tx.QueryRowContext(ctx, check.query, args...).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return check.err
+		}
 	}
 
 	if table == "category_groups" {
@@ -270,9 +336,16 @@ type SyncCategory struct {
 
 // SyncUpsertCategory inserts or fully replaces the categories row identified
 // by in.ID, assigning it a fresh server_version. Returns
-// ErrCategoryGroupNotFound if in.GroupID doesn't name an existing group.
+// ErrCategoryGroupNotFound if in.GroupID doesn't name an existing group, or
+// ErrReferenceDeleted if it names a deleted one the stored row wasn't
+// already in (§2.3).
 func SyncUpsertCategory(ctx context.Context, tx *sql.Tx, in SyncCategory) error {
-	if _, err := getCategoryGroupTx(ctx, tx, in.GroupID); err != nil {
+	var storedGroupID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT group_id FROM categories WHERE id = ?`, in.ID).Scan(&storedGroupID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := checkLiveReferenceTx(ctx, tx, "category_groups", in.GroupID, storedGroupID); err != nil {
 		return err
 	}
 
@@ -344,32 +417,27 @@ type SyncTransaction struct {
 // ErrAccountNotFound, ErrCategoryNotFound, ErrPayeeNotFound, or
 // ErrParentTransactionNotFound if the corresponding reference doesn't name
 // an existing row. Unlike the REST create path, a closed account does not
-// reject the write here — per this milestone, mutations are applied as
-// given, with no business-rule validation beyond referential existence.
+// reject the write here. account_id, category_id, and payee_id must name
+// live rows, unless the stored row already has that exact reference
+// (ErrReferenceDeleted, §2.3).
 func SyncUpsertTransaction(ctx context.Context, tx *sql.Tx, in SyncTransaction) error {
-	exists, err := checkRowExistsTx(ctx, tx, "accounts", in.AccountID)
-	if err != nil {
+	var storedAccountID, storedCategoryID, storedPayeeID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT account_id, category_id, payee_id FROM transactions WHERE id = ?`, in.ID).
+		Scan(&storedAccountID, &storedCategoryID, &storedPayeeID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if !exists {
-		return ErrAccountNotFound
+	if err := checkLiveReferenceTx(ctx, tx, "accounts", in.AccountID, storedAccountID); err != nil {
+		return err
 	}
 	if in.CategoryID.Valid {
-		exists, err := checkRowExistsTx(ctx, tx, "categories", in.CategoryID.String)
-		if err != nil {
+		if err := checkLiveReferenceTx(ctx, tx, "categories", in.CategoryID.String, storedCategoryID); err != nil {
 			return err
-		}
-		if !exists {
-			return ErrCategoryNotFound
 		}
 	}
 	if in.PayeeID.Valid {
-		exists, err := checkRowExistsTx(ctx, tx, "payees", in.PayeeID.String)
-		if err != nil {
+		if err := checkLiveReferenceTx(ctx, tx, "payees", in.PayeeID.String, storedPayeeID); err != nil {
 			return err
-		}
-		if !exists {
-			return ErrPayeeNotFound
 		}
 	}
 	if in.ParentID.Valid {
@@ -451,12 +519,13 @@ type SyncBudgetEntry struct {
 // *BudgetEntryKeyTakenError if (category_id, month) is already stored under a
 // different id, tombstones included (§5.2's unique constraint).
 func SyncUpsertBudgetEntry(ctx context.Context, tx *sql.Tx, in SyncBudgetEntry) error {
-	exists, err := checkRowExistsTx(ctx, tx, "categories", in.CategoryID)
-	if err != nil {
+	var storedCategoryID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT category_id FROM budget_entries WHERE id = ?`, in.ID).Scan(&storedCategoryID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if !exists {
-		return ErrCategoryNotFound
+	if err := checkLiveReferenceTx(ctx, tx, "categories", in.CategoryID, storedCategoryID); err != nil {
+		return err
 	}
 	if err := rejectIncomeCategoryTx(ctx, tx, in.CategoryID); err != nil {
 		return err
