@@ -1,3 +1,5 @@
+import type { Table } from "dexie";
+
 import { getDeviceToken } from "../auth";
 import { db } from "../db/db";
 import { normalizeTransactionDate, outbox } from "../db/helpers";
@@ -120,6 +122,49 @@ async function applyChange(change: SyncChangeWire): Promise<void> {
   }
 }
 
+function localTable(table: MutationTable): Table<SyncMeta, string> {
+  const tables: Record<MutationTable, unknown> = {
+    accounts: db.accounts,
+    category_groups: db.category_groups,
+    categories: db.categories,
+    payees: db.payees,
+    transactions: db.transactions,
+    budget_entries: db.budget_entries,
+  };
+  return tables[table] as Table<SyncMeta, string>;
+}
+
+// §2.4: the server returns every existing row a rejected_stale unit
+// referenced, so one that isn't in `changes` never existed there — e.g. the
+// target budget entry a stale reassignment created locally. Such a row is
+// purged if it was never acknowledged and nothing still waiting to sync
+// (including entries enqueued while this request was in flight) refers to
+// it. A purge of data the server never had, not a hard delete (§2.3).
+async function purgeLocalOnlyRows(
+  units: OutboxEntry[][],
+  results: SyncResultWire[],
+  changes: SyncChangeWire[],
+): Promise<void> {
+  const returned = new Set(changes.map((change) => `${change.table}:${change.row.id}`));
+  const pushed = new Set(units.flat().map((entry) => entry.id));
+  const waiting = (await outbox.listUnsynced()).filter((entry) => !pushed.has(entry.id));
+
+  for (let i = 0; i < units.length; i++) {
+    if (results[i]?.status !== "rejected_stale") continue;
+
+    for (const entry of units[i]) {
+      if (returned.has(`${entry.table}:${entry.row.id}`)) continue;
+      if (waiting.some((other) => other.table === entry.table && other.row.id === entry.row.id)) continue;
+
+      const table = localTable(entry.table);
+      const local = await table.get(entry.row.id);
+      if (local && local.server_version === undefined) {
+        await table.delete(entry.row.id);
+      }
+    }
+  }
+}
+
 // Marks every outbox entry in `units` synced according to its paired
 // result: "applied" and "rejected_stale" are both terminal outcomes (§2.3 —
 // losing a last-write-wins conflict is expected behavior, not something to
@@ -225,6 +270,7 @@ export async function runSync(): Promise<void> {
       for (const change of body.changes) {
         await applyChange(change);
       }
+      await purgeLocalOnlyRows(units, body.results, body.changes);
       await markOutboxResults(units, body.results);
       setCursor(body.server_version);
     }

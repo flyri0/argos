@@ -312,6 +312,98 @@ describe("runSync", () => {
     expect((await db.transactions.get(remote.id))?.date).toBe("2026-09-01");
   });
 
+  describe("rejected_stale unit with rows the server never had (§2.4)", () => {
+    const groupId = "group-stale";
+
+    function budgetEntry(overrides: Partial<BudgetEntry>): BudgetEntry {
+      return {
+        id: crypto.randomUUID(),
+        ...baseSync,
+        category_id: "cat-target",
+        month: "2026-03",
+        budgeted: 1000,
+        ...overrides,
+      };
+    }
+
+    async function enqueueInGroup(row: BudgetEntry | Account, table: "budget_entries" | "accounts") {
+      return outbox.enqueue({ table, op: "upsert", group_id: groupId, row });
+    }
+
+    it("purges a never-synced row that isn't returned, keeps an acknowledged one, and overwrites a returned one", async () => {
+      const localOnly = budgetEntry({ id: "entry-local-only" });
+      const acknowledged = budgetEntry({ id: "entry-acknowledged", category_id: "cat-other", server_version: 3 });
+      const returnedLocal = makeAccount({ name: "Local rename" });
+      await db.budget_entries.bulkAdd([localOnly, acknowledged]);
+      await db.accounts.add(returnedLocal);
+      const ids = [
+        await enqueueInGroup(returnedLocal, "accounts"),
+        await enqueueInGroup(localOnly, "budget_entries"),
+        await enqueueInGroup(acknowledged, "budget_entries"),
+      ];
+      const winner: Account = { ...returnedLocal, name: "Server state", hlc_physical: returnedLocal.hlc_physical + 1, server_version: 5 };
+      vi.mocked(fetch).mockResolvedValue(
+        okResponse(
+          baseServerBody({
+            server_version: 9,
+            results: [{ table: "accounts", id: returnedLocal.id, status: "rejected_stale" }],
+            changes: [{ table: "accounts", row: winner }],
+          }),
+        ),
+      );
+
+      await runSync();
+
+      expect(await db.budget_entries.get(localOnly.id)).toBeUndefined();
+      expect(await db.budget_entries.get(acknowledged.id)).toEqual(acknowledged);
+      expect(await db.accounts.get(returnedLocal.id)).toEqual(winner);
+      for (const id of ids) {
+        expect((await db.outbox.get(id))?.synced).toBe(true);
+      }
+    });
+
+    it("keeps a never-synced row still referenced by an entry enqueued while the request was in flight", async () => {
+      const localOnly = budgetEntry({ id: "entry-still-wanted" });
+      await db.budget_entries.add(localOnly);
+      await enqueueInGroup(localOnly, "budget_entries");
+      const laterEdit: BudgetEntry = { ...localOnly, budgeted: 2000 };
+      vi.mocked(fetch).mockImplementation(async () => {
+        await outbox.enqueue({
+          table: "budget_entries",
+          op: "upsert",
+          group_id: null,
+          row: laterEdit,
+        });
+        return okResponse(
+          baseServerBody({
+            results: [{ table: "budget_entries", id: localOnly.id, status: "rejected_stale" }],
+          }),
+        );
+      });
+
+      await runSync();
+
+      expect(await db.budget_entries.get(localOnly.id)).toBeDefined();
+    });
+
+    it("doesn't purge anything for an applied unit", async () => {
+      const localOnly = budgetEntry({ id: "entry-applied" });
+      await db.budget_entries.add(localOnly);
+      await enqueueInGroup(localOnly, "budget_entries");
+      vi.mocked(fetch).mockResolvedValue(
+        okResponse(
+          baseServerBody({
+            results: [{ table: "budget_entries", id: localOnly.id, status: "applied" }],
+          }),
+        ),
+      );
+
+      await runSync();
+
+      expect(await db.budget_entries.get(localOnly.id)).toBeDefined();
+    });
+  });
+
   it("pauses on a schema_version mismatch without applying changes or advancing the cursor", async () => {
     const remoteAccount = makeAccount({ server_version: 9 });
     vi.mocked(fetch).mockResolvedValue(
