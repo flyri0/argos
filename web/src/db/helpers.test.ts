@@ -49,6 +49,30 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
   };
 }
 
+describe("enqueueRowMutation", () => {
+  it("normalizes a transaction's timestamp date to YYYY-MM-DD in the outbox (§2.4)", async () => {
+    const transaction: Transaction = {
+      id: crypto.randomUUID(),
+      ...baseSync,
+      account_id: "acc-1",
+      category_id: null,
+      payee_id: null,
+      parent_id: null,
+      date: "2026-09-01T00:00:00Z",
+      amount: -500,
+      cleared: false,
+      notes: "",
+      transfer_id: null,
+    };
+
+    await transactions.create(transaction);
+
+    const [entry] = await outbox.listUnsynced();
+    expect(entry.op).toBe("upsert");
+    expect((entry.row as Transaction).date).toBe("2026-09-01");
+  });
+});
+
 describe("accounts (representative of the per-table CRUD shape)", () => {
   it("creates and reads a row back", async () => {
     const account = makeAccount();

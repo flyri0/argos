@@ -19,6 +19,13 @@ import type {
 // `"upsert"` carrying the row's full current state. This mirrors exactly
 // what internal/api/sync.go's applyDelete/applyUpsert expect on the wire, so
 // every write path (not just tableHelpers) funnels through it.
+// §2.4: a transaction's date is always YYYY-MM-DD. Rows pulled before the
+// server stored date as TEXT carry a full timestamp that /sync rejects, so
+// this repairs them on the way in and on the way out.
+export function normalizeTransactionDate<T extends { date: string }>(row: T): T {
+  return row.date.length > 10 ? { ...row, date: row.date.slice(0, 10) } : row;
+}
+
 export async function enqueueRowMutation(
   mutationTable: MutationTable,
   row: SyncMeta,
@@ -39,7 +46,9 @@ export async function enqueueRowMutation(
     });
     return;
   }
-  await outbox.enqueue({ table: mutationTable, op: "upsert", group_id: groupId, row });
+  const upsertRow =
+    mutationTable === "transactions" ? normalizeTransactionDate(row as Transaction) : row;
+  await outbox.enqueue({ table: mutationTable, op: "upsert", group_id: groupId, row: upsertRow });
 }
 
 // Every syncable table needs the same three operations, so this factory

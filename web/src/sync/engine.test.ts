@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDeviceToken, setDeviceToken } from "../auth";
 import { db } from "../db/db";
 import { outbox } from "../db/helpers";
-import type { Account, BudgetEntry } from "../db/types";
+import type { Account, BudgetEntry, Transaction } from "../db/types";
 import { getCursor, getSyncId } from "./cursor";
 import { runSync } from "./engine";
 import { getSyncStatus } from "./status";
@@ -286,6 +286,30 @@ describe("runSync", () => {
     expect(await db.budget_entries.get(remote.id)).toEqual(remote);
     expect((await db.budget_entries.get(local.id))?.deleted_at).not.toBeNull();
     expect(await db.outbox.count()).toBe(0);
+  });
+
+  it("stores a pulled transaction's date as YYYY-MM-DD even if the server sent a timestamp", async () => {
+    const remote: Transaction = {
+      id: "txn-remote",
+      ...baseSync,
+      server_version: 2,
+      account_id: "acc-1",
+      category_id: null,
+      payee_id: null,
+      parent_id: null,
+      date: "2026-09-01T00:00:00Z",
+      amount: -500,
+      cleared: false,
+      notes: "",
+      transfer_id: null,
+    };
+    vi.mocked(fetch).mockResolvedValue(
+      okResponse(baseServerBody({ server_version: 2, changes: [{ table: "transactions", row: remote }] })),
+    );
+
+    await runSync();
+
+    expect((await db.transactions.get(remote.id))?.date).toBe("2026-09-01");
   });
 
   it("pauses on a schema_version mismatch without applying changes or advancing the cursor", async () => {

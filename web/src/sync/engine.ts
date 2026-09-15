@@ -1,6 +1,6 @@
 import { getDeviceToken } from "../auth";
 import { db } from "../db/db";
-import { outbox } from "../db/helpers";
+import { normalizeTransactionDate, outbox } from "../db/helpers";
 import { observeHlc } from "../db/hlc";
 import type {
   Account,
@@ -99,7 +99,7 @@ async function applyChange(change: SyncChangeWire): Promise<void> {
       await db.payees.put(change.row as Payee);
       return;
     case "transactions":
-      await db.transactions.put(change.row as Transaction);
+      await db.transactions.put(normalizeTransactionDate(change.row as Transaction));
       return;
     case "budget_entries": {
       const row = change.row as BudgetEntry;

@@ -123,6 +123,7 @@ This is the exact, binding shape of the `/sync` exchange — implementations mus
 - `results`: exactly one entry per submitted mutation (or one per group, for grouped mutations — reported once under the group's first member), `status` one of `"applied"`, `"rejected_stale"` (a member's HLC was strictly older than its stored row's, or every member was already applied — expected behavior, not an error, §2.3), or `"rejected_invalid"` (accompanied by an `error` object shaped per §7.2).
 - `changes`: every row, across all syncable tables, with `server_version` greater than the request's `since` — this is the pull half of the same round-trip. In addition, regardless of `since`, it includes the current server row for every row referenced by a unit reported `rejected_stale` (rows that don't exist on the server are omitted). Without this, a losing device whose cursor is already past the winning row — or whose group was rolled back because one member was stale — would never receive the state it lost to. Each row appears at most once.
 - When a client applies a pulled `budget_entries` row, any other local row with the same `(category_id, month)` and a different id is soft-deleted locally, without an outbox entry — the server has already resolved both ids onto the pulled row (§5.2).
+- A client normalizes `transactions.date` to its first 10 characters (`YYYY-MM-DD`) when applying a pulled row and when enqueueing a mutation. This repairs local rows pulled before the server stored `date` as `TEXT`, which carried a full timestamp and would otherwise be rejected on every later write.
 
 ## 3. Binary lifecycle & system integration
 
@@ -177,7 +178,7 @@ i18n is part of the MVP, not something bolted on later.
 
 ## 5. Data model (MVP)
 
-SQLite has no native `UUID`, `BOOLEAN`, or `DATE` type — the column types used throughout this section are descriptive, not literal SQL. The actual physical mapping: `uuid` → `TEXT` (canonical lowercase hyphenated form, e.g. `550e8400-e29b-41d4-a716-446655440000`); `boolean` → `INTEGER` (`0`/`1`); `date` and the `month` field on `budget_entries` → `TEXT`, respectively `YYYY-MM-DD` and zero-padded `YYYY-MM` (e.g. `2026-03`). `text` and `integer` map directly to SQLite's own storage classes.
+SQLite has no native `UUID`, `BOOLEAN`, or `DATE` type — the column types used throughout this section are descriptive, not literal SQL. The actual physical mapping: `uuid` → `TEXT` (canonical lowercase hyphenated form, e.g. `550e8400-e29b-41d4-a716-446655440000`); `boolean` → `INTEGER` (`0`/`1`); `date` and the `month` field on `budget_entries` → `TEXT`, respectively `YYYY-MM-DD` and zero-padded `YYYY-MM` (e.g. `2026-03`). `text` and `integer` map directly to SQLite's own storage classes. A migration must never declare a column as `DATE`, `DATETIME`, or `TIMESTAMP`: the SQLite driver converts values of those declared types to time values on read, so a `YYYY-MM-DD` date would come back in a different format than was written.
 
 ### 5.1 Sync metadata (present on every syncable table below)
 
