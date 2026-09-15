@@ -186,6 +186,39 @@ describe("runSync", () => {
     expect((await db.outbox.get(id))?.synced).toBe(false);
   });
 
+  it("overwrites local rows with the winning rows sent back for a rejected_stale unit and marks its entries synced", async () => {
+    const losingLocal = makeAccount({ name: "Local rename that lost" });
+    await db.accounts.add(losingLocal);
+    const id = await outbox.enqueue({
+      table: "accounts",
+      op: "upsert",
+      group_id: null,
+      row: losingLocal,
+    });
+    const winner: Account = {
+      ...losingLocal,
+      name: "Rename from another device",
+      hlc_physical: losingLocal.hlc_physical + 1000,
+      server_version: 2,
+    };
+    vi.mocked(fetch).mockResolvedValue(
+      okResponse(
+        baseServerBody({
+          // The winner's server_version is below this device's cursor, so it
+          // only arrives because the unit was stale (§2.4).
+          server_version: 10,
+          results: [{ table: "accounts", id: losingLocal.id, status: "rejected_stale" }],
+          changes: [{ table: "accounts", row: winner }],
+        }),
+      ),
+    );
+
+    await runSync();
+
+    expect(await db.accounts.get(losingLocal.id)).toEqual(winner);
+    expect((await db.outbox.get(id))?.synced).toBe(true);
+  });
+
   it("marks every entry in a group synced from the group's single reported result", async () => {
     const groupId = crypto.randomUUID();
     const left = makeAccount({ name: "From" });

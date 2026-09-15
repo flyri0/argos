@@ -383,6 +383,144 @@ func TestSync_StaleMutationRejected(t *testing.T) {
 	}
 }
 
+func TestSync_StaleResponseIncludesWinningRowBelowCursor(t *testing.T) {
+	h := newTestSyncHandler(t)
+	const x = "33333333-3333-3333-3333-333333333333"
+
+	// Device B writes X; a pull then advances this device's cursor past it.
+	postSync(t, h, `{"since": 0, "mutations": [
+		{"table": "payees", "op": "upsert", "group_id": null, "row": {
+			"id": "`+x+`", "name": "From device B",
+			"hlc_physical": 2000, "hlc_counter": 0, "hlc_node_id": "22222222-2222-2222-2222-222222222222"
+		}}
+	]}`)
+	cursor := postSync(t, h, `{"since": 0, "mutations": []}`).ServerVersion
+
+	resp := postSync(t, h, fmt.Sprintf(`{"since": %d, "mutations": [
+		{"table": "payees", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": "Older local rename",
+			"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": "44444444-4444-4444-4444-444444444444"
+		}}
+	]}`, cursor, x))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected rejected_stale, got %+v", resp.Results)
+	}
+	var matches []syncRowPayee
+	for _, c := range resp.Changes {
+		if c.Table != "payees" {
+			continue
+		}
+		b, _ := json.Marshal(c.Row)
+		var p syncRowPayee
+		json.Unmarshal(b, &p)
+		if p.ID == x {
+			matches = append(matches, p)
+		}
+	}
+	if len(matches) != 1 || matches[0].HLCPhysical != 2000 || matches[0].Name != "From device B" {
+		t.Fatalf("expected X once with the winning HLC 2000, got %+v", matches)
+	}
+	if matches[0].ServerVersion > cursor {
+		t.Fatalf("test setup: expected X at or below the cursor %d, got server_version %d", cursor, matches[0].ServerVersion)
+	}
+}
+
+func TestSync_StaleGroupReturnsAllMemberRows(t *testing.T) {
+	h := newTestSyncHandler(t)
+	const (
+		node     = "22222222-2222-2222-2222-222222222222"
+		account  = "11111111-1111-1111-1111-111111111111"
+		group    = "33333333-3333-3333-3333-333333333333"
+		catC     = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+		catD     = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+		txnT1    = "a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1"
+		txnT2    = "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2"
+		reassign = "e3e3e3e3-e3e3-e3e3-e3e3-e3e3e3e3e3e3"
+	)
+	txn := func(groupID, id, category string, amount, hlc int64) string {
+		return fmt.Sprintf(`{"table": "transactions", "op": "upsert", "group_id": %s, "row": {
+			"id": %q, "account_id": %q, "category_id": %q, "date": "2026-01-01", "amount": %d, "cleared": false, "notes": "",
+			"hlc_physical": %d, "hlc_counter": 0, "hlc_node_id": %q
+		}}`, jsonGroupID(groupID), id, account, category, amount, hlc, node)
+	}
+	category := func(id, name string, counter int) string {
+		return fmt.Sprintf(`{"table": "categories", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "group_id": %q, "name": %q, "hidden": false, "sort_order": 0,
+			"hlc_physical": 1000, "hlc_counter": %d, "hlc_node_id": %q
+		}}`, id, group, name, counter, node)
+	}
+
+	postSync(t, h, syncBody(
+		fmt.Sprintf(`{"table": "accounts", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": "Checking", "type": "checking", "on_budget": true, "closed": false, "currency": "USD",
+			"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": %q
+		}}`, account, node),
+		fmt.Sprintf(`{"table": "category_groups", "op": "upsert", "group_id": null, "row": {
+			"id": %q, "name": "Bills", "is_income": false, "sort_order": 0,
+			"hlc_physical": 1000, "hlc_counter": 0, "hlc_node_id": %q
+		}}`, group, node),
+		category(catC, "C", 1),
+		category(catD, "D", 2),
+		txn("", txnT1, catC, -100, 1000),
+		txn("", txnT2, catC, -200, 1000),
+	))
+	// T1 is edited elsewhere with a newer HLC than the reassignment below.
+	cursor := postSync(t, h, syncBody(txn("", txnT1, catC, -700, 3000))).ServerVersion
+
+	resp := postSync(t, h, fmt.Sprintf(`{"since": %d, "mutations": [%s, %s, %s]}`, cursor,
+		txn(reassign, txnT1, catD, -100, 2000),
+		txn(reassign, txnT2, catD, -200, 2001),
+		fmt.Sprintf(`{"table": "categories", "op": "delete", "group_id": %q, "row": {
+			"id": %q, "deleted_at": 2002, "hlc_physical": 2002, "hlc_counter": 0, "hlc_node_id": %q
+		}}`, reassign, catC, node),
+	))
+
+	if len(resp.Results) != 1 || resp.Results[0].Status != "rejected_stale" {
+		t.Fatalf("expected rejected_stale, got %+v", resp.Results)
+	}
+
+	counts := map[string]int{}
+	var t1, t2 syncRowTransaction
+	var c syncRowCategory
+	for _, ch := range resp.Changes {
+		b, _ := json.Marshal(ch.Row)
+		switch ch.Table {
+		case "transactions":
+			var row syncRowTransaction
+			json.Unmarshal(b, &row)
+			counts[row.ID]++
+			if row.ID == txnT1 {
+				t1 = row
+			} else if row.ID == txnT2 {
+				t2 = row
+			}
+		case "categories":
+			var row syncRowCategory
+			json.Unmarshal(b, &row)
+			counts[row.ID]++
+			if row.ID == catC {
+				c = row
+			}
+		default:
+			t.Fatalf("unexpected change for table %s", ch.Table)
+		}
+	}
+
+	if len(resp.Changes) != 3 || counts[txnT1] != 1 || counts[txnT2] != 1 || counts[catC] != 1 {
+		t.Fatalf("expected T1, T2, and C exactly once each, got counts %v in %d changes", counts, len(resp.Changes))
+	}
+	if t1.CategoryID == nil || *t1.CategoryID != catC || t1.Amount != -700 || t1.HLCPhysical != 3000 {
+		t.Fatalf("expected T1 in its unchanged server state, got %+v", t1)
+	}
+	if t2.CategoryID == nil || *t2.CategoryID != catC || t2.HLCPhysical != 1000 {
+		t.Fatalf("expected T2 in its unchanged server state, got %+v", t2)
+	}
+	if c.DeletedAt != nil {
+		t.Fatalf("expected category C still live, got %+v", c)
+	}
+}
+
 const (
 	transferLeg1 = "55555555-5555-5555-5555-555555555555"
 	transferLeg2 = "66666666-6666-6666-6666-666666666666"

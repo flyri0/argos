@@ -44,6 +44,39 @@ func IsSyncTable(table string) bool {
 	return syncTables[table]
 }
 
+// GetSyncRow returns the stored row with the given id in table — tombstones
+// included — as its db row struct (Account, CategoryGroup, Category, Payee,
+// Transaction, or BudgetEntry). found is false if no such row exists.
+func GetSyncRow(ctx context.Context, conn *sql.DB, table, id string) (row any, found bool, err error) {
+	if !IsSyncTable(table) {
+		return nil, false, errors.New("not a syncable table: " + table)
+	}
+	switch table {
+	case "accounts":
+		return foundSyncRow(scanAccount(conn.QueryRowContext(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = ?`, id)))
+	case "category_groups":
+		return foundSyncRow(scanCategoryGroup(conn.QueryRowContext(ctx, `SELECT `+categoryGroupColumns+` FROM category_groups WHERE id = ?`, id)))
+	case "categories":
+		return foundSyncRow(scanCategory(conn.QueryRowContext(ctx, `SELECT `+categoryColumns+` FROM categories WHERE id = ?`, id)))
+	case "payees":
+		return foundSyncRow(scanPayee(conn.QueryRowContext(ctx, `SELECT `+payeeColumns+` FROM payees WHERE id = ?`, id)))
+	case "transactions":
+		return foundSyncRow(scanTransaction(conn.QueryRowContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE id = ?`, id)))
+	default: // budget_entries
+		return foundSyncRow(scanBudgetEntry(conn.QueryRowContext(ctx, `SELECT `+budgetEntryColumns+` FROM budget_entries WHERE id = ?`, id)))
+	}
+}
+
+func foundSyncRow[T any](row T, err error) (any, bool, error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return row, true, nil
+}
+
 // SyncRowHLC is the current HLC triple of an existing syncable row, used to
 // compare against an incoming mutation before applying it (§2.3).
 type SyncRowHLC struct {

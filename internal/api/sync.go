@@ -118,8 +118,13 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 
 	results := make([]syncResult, 0, len(units))
+	var staleRows []syncRowRef
 	for _, u := range units {
-		results = append(results, h.applyUnit(r.Context(), u, now))
+		result, rows := h.applyUnit(r.Context(), u, now)
+		results = append(results, result)
+		if result.Status == "rejected_stale" {
+			staleRows = append(staleRows, rows...)
+		}
 	}
 
 	serverVersion, err := db.CurrentServerVersion(r.Context(), h.DB)
@@ -135,6 +140,11 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	changes, err := h.changesSince(r.Context(), req.Since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	changes, err = h.appendStaleRows(r.Context(), changes, staleRows)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
@@ -228,12 +238,28 @@ func rowID(row json.RawMessage) string {
 	return probe.ID
 }
 
-// applyUnit applies every mutation in u within one transaction: all succeed
-// together, or the whole unit is reported as a single rejected result and
-// none of its mutations take effect (§2.3). Members already applied (equal
-// HLC) are skipped; a unit where every member was skipped is rejected_stale
-// (§2.4).
-func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) syncResult {
+// syncRowRef identifies one row a mutation referenced.
+type syncRowRef struct {
+	table string
+	id    string
+}
+
+// applyUnit applies u and also returns the row every one of its mutations
+// referenced, so a rejected_stale unit's rows can be sent back in full (§2.4).
+func (h *SyncHandler) applyUnit(ctx context.Context, u syncUnit, now time.Time) (syncResult, []syncRowRef) {
+	rows := make([]syncRowRef, 0, len(u.mutations))
+	for _, m := range u.mutations {
+		rows = append(rows, syncRowRef{table: m.Table, id: rowID(m.Row)})
+	}
+	return h.applyUnitResult(ctx, u, now), rows
+}
+
+// applyUnitResult applies every mutation in u within one transaction: all
+// succeed together, or the whole unit is reported as a single rejected result
+// and none of its mutations take effect (§2.3). Members already applied
+// (equal HLC) are skipped; a unit where every member was skipped is
+// rejected_stale (§2.4).
+func (h *SyncHandler) applyUnitResult(ctx context.Context, u syncUnit, now time.Time) syncResult {
 	tx, err := h.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return syncResult{Table: u.table, ID: u.id, Status: "rejected_invalid", Error: &apiErrorBody{Code: "INTERNAL_ERROR", Message: err.Error()}}
@@ -826,6 +852,78 @@ func nullStringPtr(s sql.NullString) *string {
 	return &s.String
 }
 
+// toSyncChange maps a db row struct (as returned by the List*Since functions
+// or db.GetSyncRow) to its §2.4 wire shape.
+func toSyncChange(table string, row any) syncChange {
+	switch r := row.(type) {
+	case db.Account:
+		return syncChange{Table: table, Row: syncRowAccount{
+			ID: r.ID, Name: r.Name, Type: r.Type, OnBudget: r.OnBudget, Closed: r.Closed, Currency: r.Currency,
+			Notes: nullStringPtr(r.Notes), HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	case db.CategoryGroup:
+		return syncChange{Table: table, Row: syncRowCategoryGroup{
+			ID: r.ID, Name: r.Name, IsIncome: r.IsIncome, SortOrder: r.SortOrder,
+			HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	case db.Category:
+		return syncChange{Table: table, Row: syncRowCategory{
+			ID: r.ID, GroupID: r.GroupID, Name: r.Name, Hidden: r.Hidden, SortOrder: r.SortOrder,
+			Notes: nullStringPtr(r.Notes), HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	case db.Payee:
+		return syncChange{Table: table, Row: syncRowPayee{
+			ID: r.ID, Name: r.Name, HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	case db.Transaction:
+		return syncChange{Table: table, Row: syncRowTransaction{
+			ID: r.ID, AccountID: r.AccountID, CategoryID: nullStringPtr(r.CategoryID), PayeeID: nullStringPtr(r.PayeeID),
+			ParentID: nullStringPtr(r.ParentID), Date: r.Date, Amount: r.Amount, Cleared: r.Cleared, Notes: r.Notes,
+			TransferID: nullStringPtr(r.TransferID), HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	case db.BudgetEntry:
+		return syncChange{Table: table, Row: syncRowBudgetEntry{
+			ID: r.ID, CategoryID: r.CategoryID, Month: r.Month, Budgeted: r.Budgeted,
+			HLCPhysical: r.HLCPhysical, HLCCounter: r.HLCCounter, HLCNodeID: r.HLCNodeID,
+			ServerVersion: r.ServerVersion, DeletedAt: nullIntPtr(r.DeletedAt),
+		}}
+	default:
+		panic("toSyncChange: unsupported row type for table " + table)
+	}
+}
+
+// syncChangeID returns the id of a change produced by toSyncChange.
+func syncChangeID(c syncChange) string {
+	switch r := c.Row.(type) {
+	case syncRowAccount:
+		return r.ID
+	case syncRowCategoryGroup:
+		return r.ID
+	case syncRowCategory:
+		return r.ID
+	case syncRowPayee:
+		return r.ID
+	case syncRowTransaction:
+		return r.ID
+	case syncRowBudgetEntry:
+		return r.ID
+	default:
+		return ""
+	}
+}
+
+func appendChanges[T any](changes []syncChange, table string, rows []T) []syncChange {
+	for _, row := range rows {
+		changes = append(changes, toSyncChange(table, row))
+	}
+	return changes
+}
+
 // changesSince assembles the "changes" half of the /sync response (§2.4):
 // every row, across all six syncable tables, with server_version greater
 // than since.
@@ -836,73 +934,66 @@ func (h *SyncHandler) changesSince(ctx context.Context, since int64) ([]syncChan
 	if err != nil {
 		return nil, err
 	}
-	for _, a := range accounts {
-		changes = append(changes, syncChange{Table: "accounts", Row: syncRowAccount{
-			ID: a.ID, Name: a.Name, Type: a.Type, OnBudget: a.OnBudget, Closed: a.Closed, Currency: a.Currency,
-			Notes: nullStringPtr(a.Notes), HLCPhysical: a.HLCPhysical, HLCCounter: a.HLCCounter, HLCNodeID: a.HLCNodeID,
-			ServerVersion: a.ServerVersion, DeletedAt: nullIntPtr(a.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "accounts", accounts)
 
 	groups, err := db.ListCategoryGroupsSince(ctx, h.DB, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, g := range groups {
-		changes = append(changes, syncChange{Table: "category_groups", Row: syncRowCategoryGroup{
-			ID: g.ID, Name: g.Name, IsIncome: g.IsIncome, SortOrder: g.SortOrder,
-			HLCPhysical: g.HLCPhysical, HLCCounter: g.HLCCounter, HLCNodeID: g.HLCNodeID,
-			ServerVersion: g.ServerVersion, DeletedAt: nullIntPtr(g.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "category_groups", groups)
 
 	categories, err := db.ListCategoriesSince(ctx, h.DB, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range categories {
-		changes = append(changes, syncChange{Table: "categories", Row: syncRowCategory{
-			ID: c.ID, GroupID: c.GroupID, Name: c.Name, Hidden: c.Hidden, SortOrder: c.SortOrder,
-			Notes: nullStringPtr(c.Notes), HLCPhysical: c.HLCPhysical, HLCCounter: c.HLCCounter, HLCNodeID: c.HLCNodeID,
-			ServerVersion: c.ServerVersion, DeletedAt: nullIntPtr(c.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "categories", categories)
 
 	payees, err := db.ListPayeesSince(ctx, h.DB, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range payees {
-		changes = append(changes, syncChange{Table: "payees", Row: syncRowPayee{
-			ID: p.ID, Name: p.Name, HLCPhysical: p.HLCPhysical, HLCCounter: p.HLCCounter, HLCNodeID: p.HLCNodeID,
-			ServerVersion: p.ServerVersion, DeletedAt: nullIntPtr(p.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "payees", payees)
 
 	transactions, err := db.ListTransactionsSince(ctx, h.DB, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, t := range transactions {
-		changes = append(changes, syncChange{Table: "transactions", Row: syncRowTransaction{
-			ID: t.ID, AccountID: t.AccountID, CategoryID: nullStringPtr(t.CategoryID), PayeeID: nullStringPtr(t.PayeeID),
-			ParentID: nullStringPtr(t.ParentID), Date: t.Date, Amount: t.Amount, Cleared: t.Cleared, Notes: t.Notes,
-			TransferID: nullStringPtr(t.TransferID), HLCPhysical: t.HLCPhysical, HLCCounter: t.HLCCounter, HLCNodeID: t.HLCNodeID,
-			ServerVersion: t.ServerVersion, DeletedAt: nullIntPtr(t.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "transactions", transactions)
 
 	entries, err := db.ListBudgetEntriesSince(ctx, h.DB, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		changes = append(changes, syncChange{Table: "budget_entries", Row: syncRowBudgetEntry{
-			ID: e.ID, CategoryID: e.CategoryID, Month: e.Month, Budgeted: e.Budgeted,
-			HLCPhysical: e.HLCPhysical, HLCCounter: e.HLCCounter, HLCNodeID: e.HLCNodeID,
-			ServerVersion: e.ServerVersion, DeletedAt: nullIntPtr(e.DeletedAt),
-		}})
-	}
+	changes = appendChanges(changes, "budget_entries", entries)
 
+	return changes, nil
+}
+
+// appendStaleRows adds the current server row for every row a rejected_stale
+// unit referenced (§2.4), even if its server_version is at or below the
+// request's since — otherwise the losing device, whose cursor may already be
+// past the winning row, would keep its losing local state forever. Rows
+// already in changes, and rows that don't exist on the server, are skipped.
+func (h *SyncHandler) appendStaleRows(ctx context.Context, changes []syncChange, refs []syncRowRef) ([]syncChange, error) {
+	if len(refs) == 0 {
+		return changes, nil
+	}
+	seen := make(map[syncRowRef]bool, len(changes)+len(refs))
+	for _, c := range changes {
+		seen[syncRowRef{table: c.Table, id: syncChangeID(c)}] = true
+	}
+	for _, ref := range refs {
+		if seen[ref] || ref.id == "" || !db.IsSyncTable(ref.table) {
+			continue
+		}
+		seen[ref] = true
+		row, found, err := db.GetSyncRow(ctx, h.DB, ref.table, ref.id)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			changes = append(changes, toSyncChange(ref.table, row))
+		}
+	}
 	return changes, nil
 }

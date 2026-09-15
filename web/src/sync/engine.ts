@@ -123,7 +123,10 @@ async function applyChange(change: SyncChangeWire): Promise<void> {
 // Marks every outbox entry in `units` synced according to its paired
 // result: "applied" and "rejected_stale" are both terminal outcomes (§2.3 —
 // losing a last-write-wins conflict is expected behavior, not something to
-// retry), so those entries are done. "rejected_invalid" entries are left
+// retry), so those entries are done. A rejected_stale entry's local row has
+// already been overwritten by then: the server returns the winning row for
+// every row in a stale unit in `changes` (§2.4), and runSync applies changes
+// before calling this. "rejected_invalid" entries are left
 // unsynced on purpose and are resent on the next sync cycle — the server
 // applies mutations independently (§2.3), so a stuck invalid entry can
 // never block any other entry from syncing, and silently dropping it would
@@ -215,6 +218,10 @@ export async function runSync(): Promise<void> {
         setSyncId(body.sync_id);
       }
 
+      // Applied before marking results: `changes` also carries the winning
+      // server rows for any rejected_stale unit (§2.4), applied like any other
+      // change, so a losing local edit is replaced before its entry is marked
+      // done.
       for (const change of body.changes) {
         await applyChange(change);
       }
