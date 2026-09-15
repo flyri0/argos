@@ -171,6 +171,9 @@ func (h *PayeesHandler) update(w http.ResponseWriter, r *http.Request, id string
 
 	updated, err := db.UpdatePayee(r.Context(), h.DB, id, patch)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this payee already exists")
+		return
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "PAYEE_NOT_FOUND", "no payee with this id")
 		return
@@ -204,6 +207,9 @@ func (h *PayeesHandler) delete(w http.ResponseWriter, r *http.Request, id string
 
 	deleted, err := db.DeletePayee(r.Context(), h.DB, id, reassignTo, hlcPhysical, hlcCounter, hlcNodeID)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this payee or a transaction it would move already exists")
+		return
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "PAYEE_NOT_FOUND", "no payee with this id")
 		return

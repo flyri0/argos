@@ -213,6 +213,9 @@ func (h *BudgetHandler) Set(w http.ResponseWriter, r *http.Request) {
 
 	err := db.SetBudgetedAmount(r.Context(), h.DB, req.ID, categoryID, month, *req.Budgeted, *req.HLCPhysical, *req.HLCCounter, req.HLCNodeID)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this budget entry already exists")
+		return
 	case errors.Is(err, db.ErrCategoryNotFound):
 		writeError(w, http.StatusNotFound, "CATEGORY_NOT_FOUND", "no category with this id")
 		return

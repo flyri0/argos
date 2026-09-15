@@ -181,7 +181,7 @@ func CreateAccount(ctx context.Context, conn *sql.DB, in NewAccount) (Account, e
 
 // UpdateAccount applies a partial update to the non-deleted account with the
 // given id, assigning it a fresh server_version. Returns ErrNotFound if no
-// such account exists.
+// such account exists, or ErrStaleWrite if the stored row is newer (§7.1).
 func UpdateAccount(ctx context.Context, conn *sql.DB, id string, in AccountUpdate) (Account, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -194,6 +194,9 @@ func UpdateAccount(ctx context.Context, conn *sql.DB, id string, in AccountUpdat
 		return Account{}, ErrNotFound
 	}
 	if err != nil {
+		return Account{}, err
+	}
+	if err := checkNotStaleTx(ctx, tx, "accounts", id, in.HLCPhysical, in.HLCCounter, in.HLCNodeID); err != nil {
 		return Account{}, err
 	}
 

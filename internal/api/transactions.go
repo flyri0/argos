@@ -82,6 +82,10 @@ func writeTransactionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "PAYEE_NOT_FOUND", "no payee with the given id")
 	case errors.Is(err, db.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, "TRANSACTION_EXISTS", "a transaction with this id already exists")
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this transaction (or its transfer sibling) already exists")
+	case errors.Is(err, db.ErrTransferLegFieldImmutable):
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "account_id and category_id cannot be changed on a transfer leg")
 	default:
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}

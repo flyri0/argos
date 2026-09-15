@@ -145,6 +145,11 @@ func SetBudgetedAmount(ctx context.Context, conn *sql.DB, id, categoryID, month 
 	}
 
 	existing, err := getBudgetEntryForPairTx(ctx, tx, categoryID, month)
+	if err == nil {
+		if staleErr := checkNotStaleTx(ctx, tx, "budget_entries", existing.ID, hlcPhysical, hlcCounter, hlcNodeID); staleErr != nil {
+			return staleErr
+		}
+	}
 	switch {
 	case err == nil && existing.DeletedAt.Valid:
 		// A tombstone still owns the pair under the UNIQUE constraint, so

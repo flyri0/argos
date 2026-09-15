@@ -230,6 +230,9 @@ func UpdateCategory(ctx context.Context, conn *sql.DB, id string, in CategoryUpd
 	if err != nil {
 		return Category{}, err
 	}
+	if err := checkNotStaleTx(ctx, tx, "categories", id, in.HLCPhysical, in.HLCCounter, in.HLCNodeID); err != nil {
+		return Category{}, err
+	}
 
 	if in.Name != nil {
 		current.Name = *in.Name
@@ -287,7 +290,8 @@ type budgetEntryRow struct {
 // reassignTo must name another existing, non-deleted category; every
 // referencing transaction and every budget_entries row move to it in the
 // same transaction, before the source is soft-deleted. Returns ErrNotFound,
-// ErrCategoryInUse (reassignTo required), or ErrReassignTargetNotFound.
+// ErrCategoryInUse (reassignTo required), ErrReassignTargetNotFound, or
+// ErrStaleWrite if any row it would modify is newer (§7.1).
 func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *string, hlcPhysical, hlcCounter int64, hlcNodeID string) (Category, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -296,6 +300,11 @@ func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *st
 	defer tx.Rollback()
 
 	if _, err := getCategoryTx(ctx, tx, id); err != nil {
+		return Category{}, err
+	}
+	// §7.1: every row this delete modifies must be older than the incoming
+	// HLC, or the whole operation is rejected (the tx rolls back).
+	if err := checkNotStaleTx(ctx, tx, "categories", id, hlcPhysical, hlcCounter, hlcNodeID); err != nil {
 		return Category{}, err
 	}
 
@@ -343,6 +352,11 @@ func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *st
 		}
 
 		if txnCount > 0 {
+			if err := checkRowsNotStaleTx(ctx, tx,
+				`SELECT hlc_physical, hlc_counter, hlc_node_id FROM transactions WHERE category_id = ? AND deleted_at IS NULL`, []any{id},
+				hlcPhysical, hlcCounter, hlcNodeID); err != nil {
+				return Category{}, err
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE transactions
 				SET category_id = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
@@ -357,6 +371,9 @@ func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *st
 		// its (category_id, month) identity (§5.2) and collide with a target
 		// tombstone under the UNIQUE constraint.
 		for _, e := range entries {
+			if err := checkNotStaleTx(ctx, tx, "budget_entries", e.ID, hlcPhysical, hlcCounter, hlcNodeID); err != nil {
+				return Category{}, err
+			}
 			target, err := getBudgetEntryForPairTx(ctx, tx, *reassignTo, e.Month)
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -369,6 +386,9 @@ func DeleteCategory(ctx context.Context, conn *sql.DB, id string, reassignTo *st
 			case err != nil:
 				return Category{}, err
 			default:
+				if err := checkNotStaleTx(ctx, tx, "budget_entries", target.ID, hlcPhysical, hlcCounter, hlcNodeID); err != nil {
+					return Category{}, err
+				}
 				merged := e.Budgeted
 				if !target.DeletedAt.Valid {
 					merged += target.Budgeted

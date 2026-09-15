@@ -363,6 +363,9 @@ func (h *AccountsHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := db.UpdateAccount(r.Context(), h.DB, id, update)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this account already exists")
+		return
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "no account with this id")
 		return

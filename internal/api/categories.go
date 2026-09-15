@@ -263,6 +263,9 @@ func (h *CategoriesHandler) update(w http.ResponseWriter, r *http.Request, id st
 
 	updated, err := db.UpdateCategory(r.Context(), h.DB, id, patch)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this category already exists")
+		return
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "CATEGORY_NOT_FOUND", "no category with this id")
 		return
@@ -296,6 +299,9 @@ func (h *CategoriesHandler) delete(w http.ResponseWriter, r *http.Request, id st
 
 	deleted, err := db.DeleteCategory(r.Context(), h.DB, id, reassignTo, hlcPhysical, hlcCounter, hlcNodeID)
 	switch {
+	case errors.Is(err, db.ErrStaleWrite):
+		writeError(w, http.StatusConflict, "STALE_WRITE", "a newer write to this category or a row it would move already exists")
+		return
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "CATEGORY_NOT_FOUND", "no category with this id")
 		return

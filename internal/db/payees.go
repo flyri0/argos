@@ -131,6 +131,9 @@ func UpdatePayee(ctx context.Context, conn *sql.DB, id string, in PayeeUpdate) (
 	if err != nil {
 		return Payee{}, err
 	}
+	if err := checkNotStaleTx(ctx, tx, "payees", id, in.HLCPhysical, in.HLCCounter, in.HLCNodeID); err != nil {
+		return Payee{}, err
+	}
 
 	if in.Name != nil {
 		current.Name = *in.Name
@@ -167,7 +170,8 @@ func UpdatePayee(ctx context.Context, conn *sql.DB, id string, in PayeeUpdate) (
 // it has been used, reassignTo must name another existing, non-deleted
 // payee; every referencing transaction moves to it in the same transaction
 // before the source is soft-deleted. Returns ErrNotFound, ErrPayeeInUse
-// (reassignTo required), or ErrReassignTargetNotFound.
+// (reassignTo required), ErrReassignTargetNotFound, or ErrStaleWrite if any
+// row it would modify is newer (§7.1).
 func DeletePayee(ctx context.Context, conn *sql.DB, id string, reassignTo *string, hlcPhysical, hlcCounter int64, hlcNodeID string) (Payee, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -176,6 +180,9 @@ func DeletePayee(ctx context.Context, conn *sql.DB, id string, reassignTo *strin
 	defer tx.Rollback()
 
 	if _, err := getPayeeTx(ctx, tx, id); err != nil {
+		return Payee{}, err
+	}
+	if err := checkNotStaleTx(ctx, tx, "payees", id, hlcPhysical, hlcCounter, hlcNodeID); err != nil {
 		return Payee{}, err
 	}
 
@@ -192,6 +199,11 @@ func DeletePayee(ctx context.Context, conn *sql.DB, id string, reassignTo *strin
 			if errors.Is(err, ErrNotFound) {
 				return Payee{}, ErrReassignTargetNotFound
 			}
+			return Payee{}, err
+		}
+		if err := checkRowsNotStaleTx(ctx, tx,
+			`SELECT hlc_physical, hlc_counter, hlc_node_id FROM transactions WHERE payee_id = ? AND deleted_at IS NULL`, []any{id},
+			hlcPhysical, hlcCounter, hlcNodeID); err != nil {
 			return Payee{}, err
 		}
 

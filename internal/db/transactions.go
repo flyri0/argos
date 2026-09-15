@@ -196,6 +196,20 @@ func checkAccountUsable(ctx context.Context, tx *sql.Tx, accountID string) error
 	return nil
 }
 
+// liveTransferSiblingTx returns the id of the other non-deleted leg sharing
+// transferID, if any.
+func liveTransferSiblingTx(ctx context.Context, tx *sql.Tx, transferID, id string) (string, bool, error) {
+	var siblingID string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM transactions WHERE transfer_id = ? AND id != ? AND deleted_at IS NULL`, transferID, id).Scan(&siblingID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return siblingID, true, nil
+}
+
 func checkRowExistsTx(ctx context.Context, tx *sql.Tx, table, id string) (bool, error) {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id = ?)`, id).Scan(&exists)
@@ -341,8 +355,11 @@ func CreateTransfer(ctx context.Context, conn *sql.DB, in NewTransfer) (Transact
 }
 
 // UpdateTransaction applies a partial update to the non-deleted transaction
-// with the given id, assigning it a fresh server_version. Returns
-// ErrNotFound, ErrAccountNotFound, ErrCategoryNotFound, or ErrPayeeNotFound.
+// with the given id, assigning it a fresh server_version. On a transfer leg,
+// date, payee_id, notes, and amount (negated) are mirrored to the live
+// sibling and the pair is validated before commit (§7.1). Returns
+// ErrNotFound, ErrAccountNotFound, ErrCategoryNotFound, ErrPayeeNotFound,
+// ErrTransferLegFieldImmutable, ErrStaleWrite, or ErrTransferPairInvalid.
 func UpdateTransaction(ctx context.Context, conn *sql.DB, id string, in TransactionUpdate) (Transaction, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -353,6 +370,15 @@ func UpdateTransaction(ctx context.Context, conn *sql.DB, id string, in Transact
 	current, err := getTransactionTx(ctx, tx, id)
 	if err != nil {
 		return Transaction{}, err
+	}
+	if err := checkNotStaleTx(ctx, tx, "transactions", id, in.HLCPhysical, in.HLCCounter, in.HLCNodeID); err != nil {
+		return Transaction{}, err
+	}
+	if current.TransferID.Valid {
+		if (in.AccountID != nil && *in.AccountID != current.AccountID) ||
+			(in.CategoryID != nil && *in.CategoryID != current.CategoryID) {
+			return Transaction{}, ErrTransferLegFieldImmutable
+		}
 	}
 
 	if in.AccountID != nil {
@@ -415,6 +441,31 @@ func UpdateTransaction(ctx context.Context, conn *sql.DB, id string, in Transact
 		return Transaction{}, err
 	}
 
+	if current.TransferID.Valid {
+		siblingID, found, err := liveTransferSiblingTx(ctx, tx, current.TransferID.String, id)
+		if err != nil {
+			return Transaction{}, err
+		}
+		if found {
+			if err := checkNotStaleTx(ctx, tx, "transactions", siblingID, in.HLCPhysical, in.HLCCounter, in.HLCNodeID); err != nil {
+				return Transaction{}, err
+			}
+			// cleared is per-leg; the shared fields travel with the pair.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE transactions
+				SET date = ?, payee_id = ?, notes = ?, amount = ?,
+				    hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
+				WHERE id = ?`,
+				current.Date, current.PayeeID, current.Notes, -current.Amount,
+				in.HLCPhysical, in.HLCCounter, in.HLCNodeID, version, siblingID); err != nil {
+				return Transaction{}, err
+			}
+		}
+		if err := CheckTransferPairTx(ctx, tx, current.TransferID.String); err != nil {
+			return Transaction{}, err
+		}
+	}
+
 	t, err := getTransactionTx(ctx, tx, id)
 	if err != nil {
 		return Transaction{}, err
@@ -426,8 +477,9 @@ func UpdateTransaction(ctx context.Context, conn *sql.DB, id string, in Transact
 }
 
 // DeleteTransaction soft-deletes the non-deleted transaction with the given
-// id (§5.1). It does not touch the other side of a transfer, if any —
-// cascading a transfer's deletion isn't asked for by this prompt.
+// id (§5.1). On a transfer leg, the live sibling is soft-deleted in the same
+// transaction with the same HLC, so the pair is never left half-deleted
+// (§7.1). Returns ErrNotFound or ErrStaleWrite.
 func DeleteTransaction(ctx context.Context, conn *sql.DB, id string, hlcPhysical, hlcCounter int64, hlcNodeID string) (Transaction, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -435,20 +487,39 @@ func DeleteTransaction(ctx context.Context, conn *sql.DB, id string, hlcPhysical
 	}
 	defer tx.Rollback()
 
-	if _, err := getTransactionTx(ctx, tx, id); err != nil {
+	current, err := getTransactionTx(ctx, tx, id)
+	if err != nil {
 		return Transaction{}, err
+	}
+
+	ids := []string{id}
+	if current.TransferID.Valid {
+		siblingID, found, err := liveTransferSiblingTx(ctx, tx, current.TransferID.String, id)
+		if err != nil {
+			return Transaction{}, err
+		}
+		if found {
+			ids = append(ids, siblingID)
+		}
+	}
+	for _, rowID := range ids {
+		if err := checkNotStaleTx(ctx, tx, "transactions", rowID, hlcPhysical, hlcCounter, hlcNodeID); err != nil {
+			return Transaction{}, err
+		}
 	}
 
 	version, err := nextServerVersion(ctx, tx)
 	if err != nil {
 		return Transaction{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE transactions
-		SET deleted_at = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
-		WHERE id = ?`,
-		hlcPhysical, hlcPhysical, hlcCounter, hlcNodeID, version, id); err != nil {
-		return Transaction{}, err
+	for _, rowID := range ids {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE transactions
+			SET deleted_at = ?, hlc_physical = ?, hlc_counter = ?, hlc_node_id = ?, server_version = ?
+			WHERE id = ?`,
+			hlcPhysical, hlcPhysical, hlcCounter, hlcNodeID, version, rowID); err != nil {
+			return Transaction{}, err
+		}
 	}
 
 	row := tx.QueryRowContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE id = ?`, id)
