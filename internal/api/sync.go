@@ -40,6 +40,28 @@ type clockSkewError struct{ msg string }
 
 func (e *clockSkewError) Error() string { return e.msg }
 
+// conflictCodes are the rejected_invalid codes that mean a concurrent
+// conflict with another device rather than malformed data (§2.4). The client
+// treats them as terminal and rolls back to the server state, so the server
+// returns the unit's rows just as for rejected_stale. Must match
+// web/src/sync/engine.ts CONFLICT_CODES.
+var conflictCodes = map[string]bool{
+	"REFERENCE_DELETED":              true,
+	"CATEGORY_IN_USE_NEEDS_REASSIGN": true,
+	"PAYEE_IN_USE_NEEDS_REASSIGN":    true,
+	"ACCOUNT_IN_USE":                 true,
+	"TRANSFER_PAIR_INVALID":          true,
+}
+
+// returnsCanonicalRows reports whether a unit's rows are sent back in
+// `changes` regardless of since (§2.4).
+func returnsCanonicalRows(result syncResult) bool {
+	if result.Status == "rejected_stale" {
+		return true
+	}
+	return result.Status == "rejected_invalid" && result.Error != nil && conflictCodes[result.Error.Code]
+}
+
 // codedError is a rejected_invalid reason that carries its own §7.2 code
 // instead of the generic SYNC_MUTATION_INVALID.
 type codedError struct{ code, msg string }
@@ -134,7 +156,7 @@ func (h *SyncHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	for _, u := range units {
 		result, rows := h.applyUnit(r.Context(), u, now)
 		results = append(results, result)
-		if result.Status == "rejected_stale" {
+		if returnsCanonicalRows(result) {
 			staleRows = append(staleRows, rows...)
 		}
 	}

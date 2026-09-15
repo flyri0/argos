@@ -9,10 +9,17 @@ export interface SyncStatus {
   // expect, syncing pauses for the rest of this session — the rest of the
   // app must keep working against the local IndexedDB copy regardless.
   schemaMismatch: boolean;
+  // §2.4: units rolled back by a conflict rejection since the user last
+  // dismissed the notice — their local edits were replaced by server state.
+  conflictCount: number;
 }
 
-let status: SyncStatus = { schemaMismatch: false };
+let status: SyncStatus = { schemaMismatch: false, conflictCount: 0 };
 const listeners = new Set<() => void>();
+
+function notify(): void {
+  for (const listener of listeners) listener();
+}
 
 export function getSyncStatus(): SyncStatus {
   return status;
@@ -21,7 +28,19 @@ export function getSyncStatus(): SyncStatus {
 export function setSchemaMismatch(schemaMismatch: boolean): void {
   if (status.schemaMismatch === schemaMismatch) return;
   status = { ...status, schemaMismatch };
-  for (const listener of listeners) listener();
+  notify();
+}
+
+export function recordConflicts(count: number): void {
+  if (count <= 0) return;
+  status = { ...status, conflictCount: status.conflictCount + count };
+  notify();
+}
+
+export function dismissConflicts(): void {
+  if (status.conflictCount === 0) return;
+  status = { ...status, conflictCount: 0 };
+  notify();
 }
 
 function subscribe(listener: () => void): () => void {

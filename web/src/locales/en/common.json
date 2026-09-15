@@ -134,6 +134,8 @@
   "budget.hiddenBadge": "Hidden",
 
   "sync.schemaMismatch": "This app is out of date and can't sync until it's updated. You can keep using it offline in the meantime — nothing you do here will be lost.",
+  "sync.conflictNotice": "Some changes made on this device conflicted with changes from another device and were undone.",
+  "sync.dismiss": "Dismiss",
 
   "devices.choice.title": "Pair this device",
   "devices.choice.instructions": "Is this the first device you're setting up on this server, or are you requesting access from a device that's already paired?",

@@ -16,7 +16,7 @@ import type {
   Transaction,
 } from "../db/types";
 import { getCursor, getSyncId, setCursor, setSyncId } from "./cursor";
-import { setSchemaMismatch } from "./status";
+import { recordConflicts, setSchemaMismatch } from "./status";
 
 // The schema_version this build of the client knows how to sync with
 // (§2.3). Must be bumped in the same commit that bumps
@@ -122,6 +122,31 @@ async function applyChange(change: SyncChangeWire): Promise<void> {
   }
 }
 
+// §2.4: rejected_invalid codes that mean a concurrent conflict with another
+// device, not malformed data. Such a unit is terminal and rolled back to the
+// server rows sent with it. Must match internal/api/sync.go conflictCodes.
+const CONFLICT_CODES = new Set([
+  "REFERENCE_DELETED",
+  "CATEGORY_IN_USE_NEEDS_REASSIGN",
+  "PAYEE_IN_USE_NEEDS_REASSIGN",
+  "ACCOUNT_IN_USE",
+  "TRANSFER_PAIR_INVALID",
+]);
+
+function isConflict(result: SyncResultWire): boolean {
+  return (
+    result.status === "rejected_invalid" &&
+    result.error !== undefined &&
+    CONFLICT_CODES.has(result.error.code)
+  );
+}
+
+// Units whose rows the server sends back in full, and which the client
+// resolves by taking that server state (§2.4).
+function isRolledBack(result: SyncResultWire | undefined): boolean {
+  return result !== undefined && (result.status === "rejected_stale" || isConflict(result));
+}
+
 function localTable(table: MutationTable): Table<SyncMeta, string> {
   const tables: Record<MutationTable, unknown> = {
     accounts: db.accounts,
@@ -150,7 +175,7 @@ async function purgeLocalOnlyRows(
   const waiting = (await outbox.listUnsynced()).filter((entry) => !pushed.has(entry.id));
 
   for (let i = 0; i < units.length; i++) {
-    if (results[i]?.status !== "rejected_stale") continue;
+    if (!isRolledBack(results[i])) continue;
 
     for (const entry of units[i]) {
       if (returned.has(`${entry.table}:${entry.row.id}`)) continue;
@@ -166,9 +191,10 @@ async function purgeLocalOnlyRows(
 }
 
 // Marks every outbox entry in `units` synced according to its paired
-// result: "applied" and "rejected_stale" are both terminal outcomes (§2.3 —
-// losing a last-write-wins conflict is expected behavior, not something to
-// retry), so those entries are done. A rejected_stale entry's local row has
+// result: "applied", "rejected_stale", and a conflict-coded
+// "rejected_invalid" are all terminal outcomes (§2.3/§2.4 — losing a
+// conflict is expected behavior, not something to retry), so those entries
+// are done. Any other "rejected_invalid" stays unsynced and is retried. A rejected_stale entry's local row has
 // already been overwritten by then: the server returns the winning row for
 // every row in a stale unit in `changes` (§2.4), and runSync applies changes
 // before calling this. "rejected_invalid" entries are left
@@ -182,7 +208,7 @@ async function markOutboxResults(
 ): Promise<void> {
   for (let i = 0; i < units.length; i++) {
     const result = results[i];
-    if (!result || result.status === "rejected_invalid") continue;
+    if (!result || !(result.status === "applied" || isRolledBack(result))) continue;
 
     for (const entry of units[i]) {
       if (entry.id !== undefined) await outbox.markSynced(entry.id);
@@ -272,6 +298,7 @@ export async function runSync(): Promise<void> {
       }
       await purgeLocalOnlyRows(units, body.results, body.changes);
       await markOutboxResults(units, body.results);
+      recordConflicts(body.results.filter(isConflict).length);
       setCursor(body.server_version);
     }
   } finally {

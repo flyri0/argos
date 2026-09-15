@@ -6,7 +6,7 @@ import { outbox } from "../db/helpers";
 import type { Account, BudgetEntry, Transaction } from "../db/types";
 import { getCursor, getSyncId } from "./cursor";
 import { runSync } from "./engine";
-import { getSyncStatus } from "./status";
+import { dismissConflicts, getSyncStatus } from "./status";
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((table) => table.clear()));
@@ -401,6 +401,82 @@ describe("runSync", () => {
       await runSync();
 
       expect(await db.budget_entries.get(localOnly.id)).toBeDefined();
+    });
+  });
+
+  describe("conflict rejections (§2.4)", () => {
+    beforeEach(() => {
+      dismissConflicts();
+    });
+
+    it("rolls the unit back: applies returned rows, purges local-only rows, marks entries synced, and counts the conflict", async () => {
+      const groupId = "group-conflict";
+      const editedLocal = makeAccount({ name: "Local edit that lost", server_version: 2 });
+      const localOnly: BudgetEntry = {
+        id: "entry-created-by-conflicting-unit",
+        ...baseSync,
+        category_id: "cat-target",
+        month: "2026-03",
+        budgeted: 1000,
+      };
+      await db.accounts.add(editedLocal);
+      await db.budget_entries.add(localOnly);
+      const ids = [
+        await outbox.enqueue({ table: "accounts", op: "upsert", group_id: groupId, row: editedLocal }),
+        await outbox.enqueue({ table: "budget_entries", op: "upsert", group_id: groupId, row: localOnly }),
+      ];
+      const serverState: Account = { ...editedLocal, name: "Server state" };
+      vi.mocked(fetch).mockResolvedValue(
+        okResponse(
+          baseServerBody({
+            server_version: 9,
+            results: [
+              {
+                table: "accounts",
+                id: editedLocal.id,
+                status: "rejected_invalid",
+                error: { code: "REFERENCE_DELETED", message: "points at a deleted row" },
+              },
+            ],
+            changes: [{ table: "accounts", row: serverState }],
+          }),
+        ),
+      );
+
+      await runSync();
+
+      expect(await db.accounts.get(editedLocal.id)).toEqual(serverState);
+      expect(await db.budget_entries.get(localOnly.id)).toBeUndefined();
+      for (const id of ids) {
+        expect((await db.outbox.get(id))?.synced).toBe(true);
+      }
+      expect(getSyncStatus().conflictCount).toBe(1);
+    });
+
+    it("keeps retrying a non-conflict rejected_invalid without touching local rows or counting a conflict", async () => {
+      const account = makeAccount({ name: "Malformed write" });
+      await db.accounts.add(account);
+      const id = await outbox.enqueue({ table: "accounts", op: "upsert", group_id: null, row: account });
+      vi.mocked(fetch).mockResolvedValue(
+        okResponse(
+          baseServerBody({
+            results: [
+              {
+                table: "accounts",
+                id: account.id,
+                status: "rejected_invalid",
+                error: { code: "SYNC_MUTATION_INVALID", message: "bad row" },
+              },
+            ],
+          }),
+        ),
+      );
+
+      await runSync();
+
+      expect((await db.outbox.get(id))?.synced).toBe(false);
+      expect(await db.accounts.get(account.id)).toEqual(account);
+      expect(getSyncStatus().conflictCount).toBe(0);
     });
   });
 
